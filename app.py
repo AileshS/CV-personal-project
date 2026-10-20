@@ -1,0 +1,492 @@
+"""A small review desk. Long-running work belongs to ``playlab worker``.
+
+Only one requested frame is decoded here. Full-game importing, clipping,
+indexing and model inference are queued; widget reruns never load models.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import streamlit as st
+from PIL import Image, ImageDraw
+
+from playlab.attention import resolve_attention
+from playlab.domain import (
+    assign_game_split,
+    assign_split_blocks,
+    merge_possessions,
+    save_possession,
+    split_possession,
+    validate_annotation,
+)
+from playlab.media import frame_at
+from playlab.store import Store
+
+SPLITS = ["unassigned", "train", "val", "test"]
+SPLIT_NAMES = {"unassigned": "Unassigned", "train": "Training", "val": "Validation", "test": "Final test"}
+
+
+def clock(seconds: float) -> str:
+    minutes, remainder = divmod(max(0.0, float(seconds)), 60)
+    hours, minutes = divmod(int(minutes), 60)
+    return f"{hours:d}:{minutes:02d}:{remainder:05.2f}"
+
+
+@st.cache_data(max_entries=48, show_spinner=False)
+def review_frame(path: str, seconds: float, modification_time: float):
+    """Cache only small stills, never the full source or a loaded detector."""
+    return frame_at(path, seconds, max_width=1280)
+
+
+def show_frame(game: dict, seconds: float, boxes=()):
+    path = Path(game["source_path"])
+    if not path.is_file():
+        st.info("Source video is unavailable on this machine. Import or restore it to review frames.")
+        return
+    try:
+        image = Image.fromarray(review_frame(str(path), seconds, path.stat().st_mtime)).convert("RGB")
+        draw = ImageDraw.Draw(image)
+        for item in boxes:
+            box = item.get("box")
+            if box and len(box) == 4:
+                coords = [box[0] * image.width, box[1] * image.height,
+                          box[2] * image.width, box[3] * image.height]
+                color = "#ffbd45" if item.get("label") == "ball" else "#17b7a2"
+                draw.rectangle(coords, outline=color, width=3)
+                draw.text((coords[0], max(0, coords[1] - 15)), item.get("label", "box"), fill=color)
+        st.image(image, caption=f"Original-game time {clock(seconds)}",
+                 alt="Basketball review frame with saved ball and rim boxes", width="stretch")
+    except (OSError, RuntimeError, ValueError) as exc:
+        st.warning(f"Could not decode this frame: {exc}")
+
+
+def save_human(store: Store, kind: str, record: dict):
+    record = validate_annotation(store, kind, {**record, "reviewed": True})
+    store.save(kind, record)
+    if kind == "shot":
+        previous = store.get("analysis", record["possession_id"])
+        if previous:
+            store.save("analysis", {**previous, "stale": True})
+
+
+def flash(message: str):
+    st.session_state["notice"] = message
+    st.rerun()
+
+
+def box_inputs(prefix: str, value=None) -> list[float]:
+    value = value or [0.4, 0.3, 0.5, 0.4]
+    cols = st.columns(4)
+    return [column.number_input(label, min_value=0.0, max_value=1.0,
+                                value=float(coordinate), step=0.001, format="%.3f", key=f"{prefix}_{i}")
+            for i, (column, label, coordinate) in enumerate(zip(cols, ["Left", "Top", "Right", "Bottom"], value))]
+
+
+st.set_page_config(page_title="Basketball play lab", page_icon=":material/sports_basketball:", layout="wide")
+st.title("Basketball play lab")
+st.caption("Review possessions, build verified training data, and inspect evidence before trusting a result.")
+store = Store(os.environ.get("PLAYLAB_DATA", "data"))
+
+if "notice" in st.session_state:
+    st.success(st.session_state.pop("notice"))
+
+with st.sidebar:
+    st.subheader("Review desk")
+    view = st.selectbox("Workspace", ["Possessions", "Frame labels", "Game setup", "Import game", "Jobs and export"],
+                        key="workspace")
+    games = store.list("game")
+    game_lookup = {g["id"]: g for g in games}
+    selected_game = st.selectbox("Game", list(game_lookup), format_func=lambda key: game_lookup[key]["name"],
+                                 key="game_choice") if games else None
+    st.caption("Local viewer: keep a worker running separately for queued work.")
+    if os.environ.get("PLAYLAB_NTFY_URL"):
+        st.caption("A phone alert endpoint is set in this environment. Test delivery and phone receipt are still unverified.")
+    else:
+        st.caption("Phone alerts are not configured in this environment.")
+    st.caption("A cloud worker needs its own alert settings. This local viewer alone cannot run with your computer off.")
+    pending_attention = store.list("attention", resolved=False)
+    if pending_attention:
+        st.warning(f"{len(pending_attention)} action request(s). Open Jobs and export.")
+
+game = game_lookup.get(selected_game)
+possessions = sorted(store.list("possession", game_id=selected_game), key=lambda item: item["start"]) if game else []
+
+if view == "Import game":
+    st.subheader("Import a game")
+    st.write("Enter a full local video path or a YouTube URL. Import runs in the worker and keeps original timestamps.")
+    with st.form("import_game"):
+        source = st.text_input("Video path or YouTube URL", key="import_source")
+        name = st.text_input("Game name", key="import_name")
+        submitted = st.form_submit_button("Queue import", key="queue_import", type="primary")
+    if submitted:
+        if not source.strip():
+            st.error("Enter a video path or URL.")
+        elif not source.startswith(("https://", "http://")) and not Path(source).expanduser().is_file():
+            st.error("That local video file does not exist.")
+        else:
+            job = store.enqueue("import", {"source": source.strip(), "name": name.strip() or "Basketball game"})
+            st.success(f"Import queued ({job[:8]}). Open Jobs and export for progress.")
+    st.info("Start the worker in a separate terminal: uv run playlab worker")
+
+elif view == "Jobs and export":
+    st.subheader("Jobs and export")
+    st.subheader("Actions that need you")
+    if not pending_attention:
+        st.info("No unresolved action requests.")
+    for request in pending_attention:
+        with st.container(border=True):
+            st.write(request["message"])
+            delivery = request.get("notification", {})
+            if delivery.get("delivered"):
+                st.caption("Notification service accepted this alert. Receipt on your phone is not verified.")
+            else:
+                st.caption(delivery.get("reason", "No phone notification was delivered for this request."))
+            if st.button("Mark action done", key=f"resolve_attention_{request['id']}"):
+                resolve_attention(store, request["id"])
+                flash("Action request marked done. Queued work still requires an active worker.")
+    st.divider()
+    st.button("Refresh job status", key="refresh_jobs")
+    jobs = store.jobs()
+    if not jobs:
+        st.info("No queued jobs yet. Import a game to begin.")
+    for job in jobs[:30]:
+        with st.container(border=True):
+            st.write(f"**{job['task'].capitalize()} · {job['status']}** · {job['id'][:8]}")
+            st.progress(float(job["progress"]))
+            if job.get("error"):
+                st.error(job["error"])
+            with st.container(horizontal=True):
+                if job["status"] in {"queued", "running"} and st.button("Cancel", key=f"cancel_{job['id']}"):
+                    store.cancel_job(job["id"])
+                    flash("Cancellation requested. Running work stops at its next checkpoint.")
+                if job["status"] in {"failed", "cancelled"} and st.button("Resume", key=f"resume_{job['id']}"):
+                    try:
+                        store.resume_job(job["id"])
+                        flash("Job queued for resume from its saved checkpoint.")
+                    except ValueError as exc:
+                        st.error(str(exc))
+    st.caption("After an interrupted worker, stop its old process and run the documented recovery command before resuming.")
+    records = {kind: store.list(kind) for kind in
+               ["game", "possession", "shot", "box", "frame", "event", "setup", "analysis", "attention"]}
+    st.download_button("Download review records", data=json.dumps(records, indent=2),
+                       file_name="basketball-review.json", mime="application/json", key="export_records")
+    st.caption("This download contains labels and predictions separately. Videos and model weights stay outside the export.")
+
+elif game is None:
+    st.info("Start with Import game. Nothing has been trained or evaluated yet.")
+
+elif view == "Game setup":
+    st.subheader("Game setup")
+    st.write("Assign dataset groups before labeling. Use separate games when available; use separated blocks only for a same-game pilot.")
+    strategy = st.selectbox("Dataset strategy", ["Whole game", "Same-game pilot"],
+                            index=int(game.get("split_mode") == "contiguous"), key=f"dataset_strategy_{game['id']}")
+    if strategy == "Whole game":
+        with st.form(f"game_split_{game['id']}"):
+            split = st.selectbox("Assign entire game to", ["train", "val", "test"],
+                                 format_func=lambda choice: SPLIT_NAMES[choice], key="whole_game_split")
+            confirmed = st.checkbox("Apply this group to all possessions and their existing labels", key="confirm_game_split")
+            assign = st.form_submit_button("Assign whole-game split", key="assign_game_split")
+        if assign:
+            if not confirmed:
+                st.error("Confirm the whole-game assignment before changing existing labels.")
+            else:
+                assign_game_split(store, game["id"], split)
+                # Clear pilot metadata when explicitly returning to game-level grouping.
+                updated_game = store.get("game", game["id"])
+                updated_game.pop("split_blocks", None)
+                updated_game["split_mode"] = "game"
+                store.save("game", updated_game)
+                flash("Whole game and its labels assigned. Keep this game out of other dataset groups.")
+    else:
+        st.warning("Same-game results are a pilot. Keep a 10-second guard at internal split boundaries and group replays together.")
+        blocks = game.get("split_blocks", [])
+        defaults = [blocks[0]["end"], blocks[1]["end"]] if len(blocks) == 3 else [game["duration"] * .6, game["duration"] * .8]
+        with st.form(f"pilot_split_{game['id']}"):
+            first_cut = st.number_input("Training block ends (game seconds)", min_value=0.0,
+                                        max_value=float(game["duration"]), value=float(defaults[0]), key="pilot_train_end")
+            second_cut = st.number_input("Validation block ends (game seconds)", min_value=0.0,
+                                         max_value=float(game["duration"]), value=float(defaults[1]), key="pilot_val_end")
+            save_blocks = st.form_submit_button("Set pilot blocks before labeling", key="save_pilot_blocks")
+        if save_blocks:
+            has_labels = any(store.list(kind, game_id=game["id"]) for kind in ("shot", "box", "frame", "event"))
+            if has_labels:
+                st.error("Pilot blocks must be set before labeling. Existing labels require an explicit migration outside this form.")
+            elif not 10 < first_cut < second_cut - 20 < game["duration"] - 30:
+                st.error("Choose blocks with enough footage for the 10-second guards on both sides of internal boundaries.")
+            else:
+                blocks = [{"start": 0.0, "end": first_cut, "split": "train"},
+                          {"start": first_cut, "end": second_cut, "split": "val"},
+                          {"start": second_cut, "end": game["duration"], "split": "test"}]
+                assign_split_blocks(store, game["id"], blocks)
+                flash("Pilot blocks saved. Possessions touching a guard remain unassigned; keep them out of training exports.")
+    st.divider()
+    st.write("Match uniform colors and mark a rim visible in a representative frame. Revisit setup after a camera change.")
+    setup = store.get("setup", game["id"]) or {}
+    seconds = st.number_input("Setup frame time (game seconds)", min_value=0.0,
+                              max_value=float(game["duration"]), value=float(setup.get("time", 0)),
+                              step=0.1, key=f"setup_time_{game['id']}")
+    show_frame(game, seconds, [{"label": "rim", "box": setup["rim"]}] if setup.get("rim") else [])
+    with st.form(f"setup_{game['id']}"):
+        colors = setup.get("team_colors", ["#ffffff", "#163b78"])
+        left, right = st.columns(2)
+        color_a = left.color_picker("Team A uniform", value=colors[0])
+        color_b = right.color_picker("Team B uniform", value=colors[1])
+        st.caption("Rim box: fractions of the frame, from 0 to 1. Left must be less than right; top less than bottom.")
+        rim = box_inputs(f"setup_rim_{game['id']}", setup.get("rim"))
+        reviewed = st.checkbox("I checked this setup against the frame", key=f"setup_reviewed_{game['id']}")
+        save_setup = st.form_submit_button("Save setup", key="save_setup")
+    if save_setup:
+        if not reviewed:
+            st.error("Review the frame before saving setup.")
+        elif rim[0] >= rim[2] or rim[1] >= rim[3]:
+            st.error("The rim needs positive width and height.")
+        elif color_a == color_b:
+            st.error("Choose different uniform colors for the two teams.")
+        else:
+            store.save("setup", {"id": game["id"], "game_id": game["id"], "time": seconds,
+                                 "rim": rim, "team_colors": [color_a, color_b], "reviewed": True})
+            for old_analysis in store.list("analysis", game_id=game["id"]):
+                store.save("analysis", {**old_analysis, "stale": True})
+            flash("Game setup saved. Validate it again when the camera view changes.")
+
+else:
+    st.subheader(game["name"])
+    st.caption(f"{clock(game['duration'])} · {game['width']} × {game['height']} · Source timestamps retained")
+    if view == "Possessions":
+        with st.container(horizontal=True):
+            if st.button("Propose possessions", key="queue_index"):
+                store.enqueue("index", {"game_id": game["id"]})
+                flash("Possession proposal job queued. Automatic boundaries need review.")
+        with st.expander("Add a possession manually", expanded=not possessions):
+            with st.form(f"new_possession_{game['id']}"):
+                start = st.number_input("Start (game seconds)", min_value=0.0,
+                                        max_value=float(game["duration"]), value=0.0, key="new_start")
+                end = st.number_input("End (game seconds)", min_value=0.0,
+                                      max_value=float(game["duration"]), value=min(24.0, game["duration"]), key="new_end")
+                create = st.form_submit_button("Add possession", key="add_possession")
+            if create:
+                try:
+                    save_possession(store, game["id"], start, end)
+                    flash("Possession added. Assign a dataset split and review its boundaries.")
+                except ValueError as exc:
+                    st.error(str(exc))
+    if not possessions:
+        st.info("No possessions yet. Propose boundaries or add a reviewed segment manually.")
+    else:
+        lookup = {p["id"]: p for p in possessions}
+        possession_id = st.selectbox("Possession", list(lookup), key=f"possession_choice_{game['id']}",
+                                    format_func=lambda key: f"{clock(lookup[key]['start'])}–{clock(lookup[key]['end'])} · "
+                                                            f"{lookup[key]['split']} · "
+                                                            f"{'reviewed' if lookup[key]['reviewed'] else 'needs review'}")
+        possession = lookup[possession_id]
+        prefix = f"{possession_id}_{possession['revision']}"
+        if view == "Frame labels":
+            st.write("Choose a frame, mark every visible ball and rim, then mark the frame reviewed. Negative frames matter too.")
+            seconds = st.number_input("Frame time (game seconds)", min_value=float(possession["start"]),
+                                      max_value=float(possession["end"]), value=float(possession["start"]),
+                                      step=0.1, format="%.3f", key=f"frame_time_{prefix}")
+            def same_frame(item):
+                return abs(float(item["time"]) - seconds) < 0.0005
+
+            boxes = [b for b in store.list("box", possession_id=possession_id) if same_frame(b)]
+            frame_id = f"{possession_id}:{seconds:.3f}"
+            reviewed_frame = store.get("frame", frame_id)
+            show_frame(game, seconds, boxes)
+            st.caption(f"Saved boxes: {len(boxes)} · Frame {'reviewed' if reviewed_frame and reviewed_frame['reviewed'] else 'not reviewed'}")
+            box_lookup = {b["id"]: b for b in boxes}
+            box_id = st.selectbox("Box to edit", ["new", *box_lookup], key=f"box_choice_{frame_id}",
+                                  format_func=lambda key: "New box" if key == "new" else f"{box_lookup[key]['label']} · {key[:8]}")
+            old_box = box_lookup.get(box_id, {})
+            with st.form(f"box_{frame_id}_{box_id}"):
+                label = st.selectbox("Object", ["ball", "rim"], index=1 if old_box.get("label") == "rim" else 0)
+                st.caption("Use normalized frame coordinates. For example, halfway across is 0.5.")
+                coordinates = box_inputs(f"box_{frame_id}_{box_id}", old_box.get("box"))
+                save_box = st.form_submit_button("Save reviewed box", key="save_box")
+            if save_box:
+                try:
+                    record = {"game_id": game["id"], "possession_id": possession_id, "time": seconds,
+                              "label": label, "box": coordinates, "split": possession["split"]}
+                    if old_box:
+                        record["id"] = old_box["id"]
+                    save_human(store, "box", record)
+                    if reviewed_frame:
+                        store.save("frame", {**reviewed_frame, "reviewed": False, "negative": False})
+                    flash("Box saved. Mark the complete frame reviewed when all boxes are correct.")
+                except ValueError as exc:
+                    st.error(str(exc))
+            with st.container(horizontal=True):
+                if reviewed_frame and st.button("Remove frame review label", key="remove_frame_review"):
+                    store.delete("frame", frame_id)
+                    flash("Frame review removed. Add or correct boxes, then review the frame again.")
+                if old_box and st.button("Delete selected box", key="delete_box"):
+                    store.delete("box", old_box["id"])
+                    if reviewed_frame:
+                        store.save("frame", {**reviewed_frame, "reviewed": False})
+                    flash("Box deleted. Review the frame again before exporting training data.")
+                if st.button("Mark complete frame reviewed", key="review_frame", disabled=not boxes):
+                    save_human(store, "frame", {"id": frame_id, "game_id": game["id"],
+                                               "possession_id": possession_id, "time": seconds,
+                                               "negative": False, "split": possession["split"]})
+                    flash("Frame reviewed with its saved boxes.")
+                if st.button("Reviewed negative: no ball or rim", key="negative_frame", disabled=bool(boxes)):
+                    save_human(store, "frame", {"id": frame_id, "game_id": game["id"],
+                                               "possession_id": possession_id, "time": seconds,
+                                               "negative": True, "split": possession["split"]})
+                    flash("Negative frame reviewed. It will help measure false detections.")
+        else:
+            clip = store.get("clip", possession_id)
+            if (clip and not clip.get("stale") and clip.get("possession_revision") == possession["revision"]
+                    and Path(clip["path"]).is_file()):
+                st.video(clip["path"], alt="Selected basketball possession")
+            else:
+                st.info("Prepare a short play clip to watch this possession without loading the full game.")
+                if st.button("Prepare play clip", key="queue_clip"):
+                    store.enqueue("clip", {"possession_id": possession_id})
+                    flash("Play clip queued. Refresh when the worker finishes.")
+            with st.expander("Edit possession and dataset split"):
+                with st.form(f"edit_{prefix}"):
+                    start = st.number_input("Start (game seconds)", min_value=0.0, max_value=float(game["duration"]),
+                                            value=float(possession["start"]), step=0.1, key=f"edit_start_{prefix}")
+                    end = st.number_input("End (game seconds)", min_value=0.0, max_value=float(game["duration"]),
+                                          value=float(possession["end"]), step=0.1, key=f"edit_end_{prefix}")
+                    split = st.selectbox("Dataset split", SPLITS, index=SPLITS.index(possession["split"]),
+                                         format_func=lambda choice: SPLIT_NAMES[choice], key=f"split_{prefix}")
+                    checked = st.checkbox("I reviewed the whole possession boundaries", value=possession["reviewed"], key=f"checked_{prefix}")
+                    st.caption("Keep related frames, shots and replays in one split. Final test footage must stay untouched during model selection.")
+                    update = st.form_submit_button("Save possession", key="save_possession")
+                if update:
+                    try:
+                        save_possession(store, game["id"], start, end, record_id=possession_id, reviewed=checked, split=split)
+                        flash("Possession saved. Cached clips and predictions may need refreshing after a boundary change.")
+                    except ValueError as exc:
+                        st.error(str(exc))
+                with st.form(f"split_possession_{prefix}"):
+                    at = st.number_input("Split at (game seconds)", min_value=float(possession["start"]),
+                                         max_value=float(possession["end"]), value=(possession["start"] + possession["end"]) / 2)
+                    divide = st.form_submit_button("Split possession", key="split_possession")
+                if divide:
+                    try:
+                        split_possession(store, possession_id, at)
+                        flash("Possession split. Check both resulting segments.")
+                    except ValueError as exc:
+                        st.error(str(exc))
+                position = list(lookup).index(possession_id)
+                if position + 1 < len(possessions) and st.button("Merge with next possession", key="merge_next"):
+                    try:
+                        merge_possessions(store, [possession_id, possessions[position + 1]["id"]])
+                        flash("Possessions merged. Check the combined boundaries.")
+                    except ValueError as exc:
+                        st.error(str(exc))
+            st.subheader("Analyze this possession")
+            with st.form(f"analyze_{prefix}"):
+                device = st.selectbox("Processing device", ["cpu", "cuda:0"], key="device")
+                weights = st.text_input("Ball/rim model path (optional)", key="model_weights",
+                                        help="A reviewed fine-tuned detector improves ball and rim detection. Blank uses the documented baseline.")
+                classifier = st.text_input("Shot-classifier bundle path (optional)", key="classifier_bundle",
+                                            help="Use the bundle saved by the classifier training command. Blank uses the trajectory baseline.")
+                analyze = st.form_submit_button("Queue analysis", key="queue_analysis", type="primary")
+            if analyze:
+                payload = {"possession_id": possession_id, "device": device}
+                if weights.strip():
+                    payload["weights"] = weights.strip()
+                if classifier.strip():
+                    payload["model_bundle"] = classifier.strip()
+                store.enqueue("analyze", payload)
+                flash("Analysis queued. Predictions remain separate from your labels.")
+            analyses = store.list("analysis", possession_id=possession_id)
+            if analyses:
+                analysis = analyses[-1]
+                stale = analysis.get("stale") or analysis.get("possession_revision") not in (None, possession["revision"])
+                if stale:
+                    st.warning("Possession boundaries, shot anchors or setup changed after this analysis. Run it again.")
+                st.warning("Experimental results: check evidence. Closest defender means approximate image proximity, not court distance.")
+                for warning in analysis.get("warnings", []):
+                    st.caption(warning)
+                if analysis.get("status"):
+                    st.write(f"Processing status: {analysis['status']}. Human review is still required.")
+                for i, event in enumerate(analysis.get("events", []), 1):
+                    with st.container(border=True):
+                        st.write(f"**Attempt {i}: {event.get('result', 'unknown')}** · {event.get('status', 'needs review')}")
+                        if event.get("release") is not None:
+                            st.write(f"Release: {clock(event['release'])}")
+                        if event.get("defender"):
+                            nearest = event["defender"]
+                            if nearest.get("track_id") is not None:
+                                st.write(f"Closest visible opponent: track {nearest['track_id']} (approximate image proximity)")
+                            else:
+                                st.caption(f"Defender: {nearest.get('reason', 'needs review')}")
+                        evidence = event.get("evidence_path")
+                        if evidence and Path(evidence).is_file():
+                            st.image(evidence, alt="Shot evidence at release with player highlights", width="stretch")
+                        if event.get("reason"):
+                            st.caption(str(event["reason"]))
+                if not analysis.get("events"):
+                    st.info("No supported shot attempts found. This does not prove the possession had no shot.")
+                with st.expander("Automatic evidence record"):
+                    st.json(analysis)
+            else:
+                st.info("No analysis yet. You can label this possession manually while collecting training data.")
+            st.subheader("Your reviewed labels")
+            shots = store.list("shot", possession_id=possession_id)
+            shot_lookup = {s["id"]: s for s in shots}
+            shot_id = st.selectbox("Shot to label", ["new", *shot_lookup], key=f"shot_choice_{prefix}",
+                                   format_func=lambda key: "New shot" if key == "new" else f"{clock(shot_lookup[key]['release'])} · {shot_lookup[key]['result']}")
+            shot = shot_lookup.get(shot_id, {})
+            with st.form(f"shot_{prefix}_{shot_id}"):
+                release = st.number_input("Release time (game seconds)", min_value=float(possession["start"]),
+                                          max_value=float(possession["end"]), value=float(shot.get("release", possession["start"])), step=0.01)
+                result = st.selectbox("Shot result", ["unknown", "made", "missed"], index=["unknown", "made", "missed"].index(shot.get("result", "unknown")))
+                shooter = st.text_input("Shooter track ID (blank if unclear)", value=shot.get("shooter_id") or "")
+                defender = st.text_input("Closest opponent track ID (blank if unclear)", value=shot.get("defender_id") or "")
+                free_throw = st.checkbox("Free throw", value=bool(shot.get("free_throw", False)))
+                confirmed = st.checkbox("I checked the release and outcome", key=f"confirm_shot_{prefix}_{shot_id}")
+                save_shot = st.form_submit_button("Save reviewed shot", key="save_shot")
+            if save_shot:
+                if not confirmed:
+                    st.error("Review the attempt before saving a verified label.")
+                else:
+                    try:
+                        record = {"game_id": game["id"], "possession_id": possession_id, "release": release,
+                                  "result": result, "shooter_id": shooter.strip() or None,
+                                  "defender_id": None if free_throw else defender.strip() or None,
+                                  "free_throw": free_throw, "shot_type": "free_throw" if free_throw else "field_goal",
+                                  "split": possession["split"]}
+                        if shot:
+                            record["id"] = shot["id"]
+                        save_human(store, "shot", record)
+                        flash("Reviewed shot saved separately from automatic predictions.")
+                    except ValueError as exc:
+                        st.error(str(exc))
+            if shot and st.button("Delete selected shot label", key="delete_shot"):
+                store.delete("shot", shot["id"])
+                previous = store.get("analysis", possession_id)
+                if previous:
+                    store.save("analysis", {**previous, "stale": True})
+                flash("Human shot label deleted. Automatic evidence retained.")
+            with st.expander("Manual foul or turnover label"):
+                st.caption("These labels build future training data. Automatic foul and turnover prediction is deferred.")
+                with st.form(f"event_{prefix}"):
+                    event_type = st.selectbox("Event", ["foul", "turnover"])
+                    event_time = st.number_input("Event time (game seconds)", min_value=float(possession["start"]),
+                                                 max_value=float(possession["end"]), value=float(possession["start"]), step=0.1)
+                    notes = st.text_input("Notes", key=f"event_notes_{prefix}")
+                    verified_event = st.checkbox("I verified this event", key=f"event_reviewed_{prefix}")
+                    save_event = st.form_submit_button("Save manual event", key="save_event")
+                if save_event:
+                    if not verified_event:
+                        st.error("Verify the event before saving.")
+                    else:
+                        try:
+                            save_human(store, "event", {"game_id": game["id"], "possession_id": possession_id,
+                                                       "time": event_time, "type": event_type, "notes": notes,
+                                                       "split": possession["split"]})
+                            flash("Manual event saved for future training.")
+                        except ValueError as exc:
+                            st.error(str(exc))
+                for saved_event in store.list("event", possession_id=possession_id):
+                    st.write(f"{clock(saved_event['time'])} · {saved_event['type']} · {saved_event.get('notes', '')}")
+                    if st.button("Delete event label", key=f"delete_event_{saved_event['id']}"):
+                        store.delete("event", saved_event["id"])
+                        flash("Manual event label deleted.")
