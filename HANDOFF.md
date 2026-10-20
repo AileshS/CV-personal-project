@@ -2,7 +2,7 @@
 
 Paused at the user's request on October 20, 2026. Requested delivery: October 23.
 Repository destination: https://github.com/AileshS/CV-personal-project
-Local checkout: `C:\Users\ailes\Downloads\CV1\Basketball-Play-Lab`.
+Local checkout folder: `Basketball-Play-Lab` inside the user's CV1 workspace.
 
 ## Accepted scope
 
@@ -98,8 +98,11 @@ labels become available. Do not claim local assets are already in the cloud.
 - Automatic shot release is an estimate. Report assisted results separately.
 - Frame sampling timestamps are approximate to the selected sampling interval;
   source clips use elapsed FFmpeg seeking rather than nominal source-frame FPS.
-- No full-game import/indexing result has been verified. A complete download was
-  attempted locally and then stopped on pause; do not assume the video exists.
+- The complete source finished downloading before the pause took effect and was
+  imported locally: `data/sources/B-c3Ybc8HYE.mp4`, 1920x1080, 30fps, audio,
+  7,170.62 seconds. The local workspace contains its saved game record.
+  It is excluded from Git and NOT available to the cloud checkout. Full-game
+  indexing and basketball accuracy remain unverified. No import worker is left running.
 - Notification failures must never stop the worker. Malformed topic URLs were
   changed to fail soft and preserve the human-action record; retest this.
 
