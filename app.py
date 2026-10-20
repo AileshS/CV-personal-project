@@ -12,6 +12,7 @@ from pathlib import Path
 import streamlit as st
 from PIL import Image, ImageDraw
 
+from playlab.analysis import analysis_is_fresh
 from playlab.attention import resolve_attention
 from playlab.domain import (
     assign_game_split,
@@ -382,13 +383,17 @@ else:
             st.subheader("Analyze this possession")
             with st.form(f"analyze_{prefix}"):
                 device = st.selectbox("Processing device", ["cpu", "cuda:0"], key="device")
+                mode = st.selectbox("Release mode", ["assisted", "automatic"], key="analysis_mode",
+                                    format_func=lambda value: "Use reviewed release anchors" if value == "assisted"
+                                    else "Discover shots automatically",
+                                    help="Automatic analysis ignores saved shot anchors. Evaluate each mode separately.")
                 weights = st.text_input("Ball/rim model path (optional)", key="model_weights",
                                         help="A reviewed fine-tuned detector improves ball and rim detection. Blank uses the documented baseline.")
                 classifier = st.text_input("Shot-classifier bundle path (optional)", key="classifier_bundle",
                                             help="Use the bundle saved by the classifier training command. Blank uses the trajectory baseline.")
                 analyze = st.form_submit_button("Queue analysis", key="queue_analysis", type="primary")
             if analyze:
-                payload = {"possession_id": possession_id, "device": device}
+                payload = {"possession_id": possession_id, "device": device, "mode": mode}
                 if weights.strip():
                     payload["weights"] = weights.strip()
                 if classifier.strip():
@@ -396,9 +401,10 @@ else:
                 store.enqueue("analyze", payload)
                 flash("Analysis queued. Predictions remain separate from your labels.")
             analyses = store.list("analysis", possession_id=possession_id)
+            analyses = [item for item in analyses if item.get("analysis_mode", "assisted") == mode]
             if analyses:
                 analysis = analyses[-1]
-                stale = analysis.get("stale") or analysis.get("possession_revision") not in (None, possession["revision"])
+                stale = not analysis_is_fresh(store, analysis)
                 if stale:
                     st.warning("Possession boundaries, shot anchors or setup changed after this analysis. Run it again.")
                 st.warning("Experimental results: check evidence. Closest defender means approximate image proximity, not court distance.")

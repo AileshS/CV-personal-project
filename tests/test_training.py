@@ -119,10 +119,20 @@ def test_detector_pause_resume_keeps_dataset_and_rng_provenance(tmp_path, monkey
         path.parent.mkdir(parents=True)
         path.write_bytes(b"stub-ML-does-not-decode-this")
         files[path.relative_to(dataset).as_posix()] = file_hash(path)
+        label = dataset / "labels" / split / "fixture.txt"
+        label.parent.mkdir(parents=True)
+        label.write_text("0 0.5 0.5 0.1 0.1\n1 0.5 0.2 0.2 0.1\n")
+        files[label.relative_to(dataset).as_posix()] = file_hash(label)
     manifest = {"files": files}
     manifest["dataset_hash"] = canonical_hash(manifest)
     (dataset / "manifest.json").write_text(json.dumps(manifest))
     restored = []
+    calls = []
+    # Valid-looking extras must not be silently included in either split.
+    for split in ("train", "val", "test"):
+        extra = dataset / "images" / split / "not-in-manifest.png"
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_bytes(b"unverified")
 
     def save(value, destination):
         with Path(destination).open("wb") as stream:
@@ -143,6 +153,7 @@ def test_detector_pause_resume_keeps_dataset_and_rng_provenance(tmp_path, monkey
             self.callbacks[name] = callback
 
         def train(self, **options):
+            calls.append(options)
             last = Path(options["project"]) / options["name"] / "weights" / "last.pt"
             last.parent.mkdir(parents=True, exist_ok=True)
             trainer = SimpleNamespace(last=last, epoch=int(options["resume"]))
@@ -155,11 +166,45 @@ def test_detector_pause_resume_keeps_dataset_and_rng_provenance(tmp_path, monkey
     monkeypatch.setattr("playlab.training.code_version", lambda: {"revision": "unit", "source_hash": "unit"})
     monkeypatch.setenv("PLAYLAB_MODEL_DIR", str(tmp_path / "models"))
     output = tmp_path / "run"
-    checkpoint = train_detector(dataset, output, epochs=4, stop_after_epochs=1)
+    with pytest.raises(ValueError, match="Unmanifested"):
+        train_detector(dataset, output, epochs=4, stop_after_epochs=1, image_size=96)
+    for extra in (dataset / "images").rglob("not-in-manifest.png"):
+        extra.unlink()
+    checkpoint = train_detector(dataset, output, epochs=4, stop_after_epochs=1, image_size=96)
     assert Path(str(checkpoint) + ".rng.pt").is_file()
     assert json.loads((output / "training.json").read_text())["status"] == "paused"
-    train_detector(dataset, output, resume=checkpoint, epochs=4)
+    assert calls[0]["imgsz"] == 96
+    assert "test:" not in (output / "train-data.yaml").read_text()
+    for split in ("train", "val"):
+        assert (output / f"{split}-images.txt").read_text().splitlines() == [
+            str(dataset / "images" / split / "fixture.png")]
+    with pytest.raises(ValueError, match="Epoch limit or image size"):
+        train_detector(dataset, output, resume=checkpoint, epochs=5, image_size=96)
+    with pytest.raises(ValueError, match="Epoch limit or image size"):
+        train_detector(dataset, output, resume=checkpoint, epochs=4, image_size=128)
+    with pytest.raises(ValueError, match="this run's"):
+        train_detector(dataset, output, resume=tmp_path / "other-last.pt", epochs=4, image_size=96)
+    sidecar = Path(str(checkpoint) + ".rng.pt")
+    original = sidecar.read_bytes()
+    sidecar.write_bytes(b"changed sidecar")
+    with pytest.raises(ValueError, match="sidecar changed"):
+        train_detector(dataset, output, resume=checkpoint, epochs=4, image_size=96)
+    sidecar.write_bytes(original)
+    train_detector(dataset, output, resume=checkpoint, epochs=4, image_size=96)
     assert restored == [b"rng-state"]
     assert json.loads((output / "training.json").read_text())["status"] == "completed"
     with pytest.raises(ValueError, match="Completed training"):
-        train_detector(dataset, output, resume=checkpoint, epochs=4)
+        train_detector(dataset, output, resume=checkpoint, epochs=4, image_size=96)
+
+
+@pytest.mark.parametrize("image_size", [31, 65, 4096, True, 96.0])
+def test_detector_rejects_invalid_image_size_before_optional_imports(tmp_path, image_size):
+    from playlab.dataset import canonical_hash
+
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    manifest = {"files": {}}
+    manifest["dataset_hash"] = canonical_hash(manifest)
+    (dataset / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="image_size"):
+        train_detector(dataset, tmp_path / "run", image_size=image_size)

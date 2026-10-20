@@ -227,3 +227,11 @@ def test_selected_trained_models_are_passed_to_worker(desk):
     payload = desk.jobs()[0]["payload"]
     assert payload["weights"] == "models/ball-rim.pt"
     assert payload["model_bundle"] == "models/shots.joblib"
+
+
+def test_automatic_release_mode_is_queued_explicitly(desk):
+    at = app()
+    at.selectbox(key="analysis_mode").set_value("automatic")
+    at.button(key="queue_analysis").click().run()
+    assert not at.exception
+    assert desk.jobs()[0]["payload"]["mode"] == "automatic"

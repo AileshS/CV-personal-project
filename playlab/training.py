@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import time
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import numpy as np
@@ -159,7 +160,8 @@ def train_classifier(rows, output: str | Path) -> Path:
 
 
 def train_detector(dataset: str | Path, output: str | Path, device: str = "cpu", resume=None,
-                   max_hours: float = 2, epochs: int = 40, stop_after_epochs: int | None = None) -> Path:
+                   max_hours: float = 2, epochs: int = 40, stop_after_epochs: int | None = None,
+                   image_size: int = 960) -> Path:
     """Fine tune a two-class ball/rim YOLO head, never evaluating the test set.
 
     stop_after_epochs=1 intentionally pauses after a recoverable model save. Resume
@@ -172,11 +174,24 @@ def train_detector(dataset: str | Path, output: str | Path, device: str = "cpu",
         raise ValueError("Choose a positive training limit (<=2 hours, <=1000 epochs).")
     if stop_after_epochs is not None and stop_after_epochs < 1:
         raise ValueError("stop_after_epochs must be positive.")
+    if isinstance(image_size, bool) or not isinstance(image_size, int) or not 32 <= image_size <= 2048 or image_size % 32:
+        raise ValueError("image_size must be a multiple of 32 between 32 and 2048.")
+    # Enumerate only verified images. Directory globs allow unmanifested files
+    # to enter training/validation, even though the dataset hash is unchanged.
+    images = {}
     for split in ("train", "val"):
-        if not list((dataset / "images" / split).glob("*.png")):
+        images[split] = sorted(dataset / relative for relative in manifest["files"]
+                               if Path(relative).parts[:2] == ("images", split)
+                               and Path(relative).suffix.lower() == ".png")
+        if not images[split]:
             raise ValueError(f"No reviewed {split} images. Export positive boxes and/or explicit negative frames.")
+        for image in images[split]:
+            label = Path("labels") / split / image.relative_to(dataset / "images" / split).with_suffix(".txt")
+            if label.as_posix() not in manifest["files"]:
+                raise ValueError(f"Reviewed image has no verified label file: {image.name}")
     provenance = {"dataset_hash": manifest["dataset_hash"], "code": code_version(),
                   "seed": 42, "epochs": epochs, "max_hours": max_hours, "device": device,
+                  "image_size": image_size, "image_counts": {key: len(value) for key, value in images.items()},
                   "model": "yolo11n", "classes": ["ball", "rim"], "test_used_for_selection": False}
     previous = output / "training.json"
     elapsed_before = 0.0
@@ -188,8 +203,17 @@ def train_detector(dataset: str | Path, output: str | Path, device: str = "cpu",
             raise ValueError("Completed training checkpoints are finalized. Start a new run; resume an interrupted run.")
         if saved["dataset_hash"] != manifest["dataset_hash"] or saved["code"] != provenance["code"]:
             raise ValueError("Dataset or code changed; start a new run rather than resuming.")
+        if saved.get("epochs") != epochs or saved.get("image_size", 960) != image_size:
+            raise ValueError("Epoch limit or image size changed; resume the original configuration or start a new run.")
+        expected_checkpoint = output / "detector" / "weights" / "last.pt"
+        if Path(resume).resolve() != expected_checkpoint:
+            raise ValueError("Resume must use this run's detector/weights/last.pt checkpoint.")
         if not Path(resume).is_file() or not Path(str(resume) + ".rng.pt").is_file():
             raise ValueError("Resume needs both last.pt and its saved RNG sidecar.")
+        for path, key in ((Path(resume), "last_checkpoint_sha256"),
+                          (Path(str(resume) + ".rng.pt"), "rng_sidecar_sha256")):
+            if saved.get(key) and file_hash(path) != saved[key]:
+                raise ValueError("Checkpoint or RNG sidecar changed; resume the recorded original files.")
         elapsed_before = float(saved.get("elapsed_seconds", 0))
         max_hours = min(max_hours, float(saved["max_hours"]))
         if elapsed_before >= max_hours * 3600:
@@ -209,6 +233,18 @@ def train_detector(dataset: str | Path, output: str | Path, device: str = "cpu",
     import random
     import sqlite3
 
+    runtime_versions = {}
+    for package in ("torch", "ultralytics", "numpy"):
+        try:
+            runtime_versions[package] = version(package)
+        except PackageNotFoundError:
+            runtime_versions[package] = "unavailable"
+    if resume and saved.get("runtime_versions") != runtime_versions:
+        raise ValueError("Training runtime versions changed; resume the original runtime or start a new run.")
+    provenance["runtime_versions"] = runtime_versions
+    initial_weights = model_directory / "yolo11n.pt"
+    provenance["initial_weights_sha256"] = (saved.get("initial_weights_sha256") if resume else
+                                             file_hash(initial_weights) if initial_weights.is_file() else None)
     output.mkdir(parents=True, exist_ok=True)
     # Atomic, bounded attempt registry shared by sibling run directories. A
     # checkpoint resume belongs to its existing attempt, not a new candidate.
@@ -221,8 +257,14 @@ def train_detector(dataset: str | Path, output: str | Path, device: str = "cpu",
             raise ValueError("Three detector candidates have already been attempted for this dataset here. Stop and review.")
         if not existing:
             budget.execute("INSERT INTO attempts VALUES (?,?)", (manifest["dataset_hash"], str(output)))
+    # The list files live with the run, preserving the immutable dataset bundle.
+    # Ultralytics maps each listed /images/ path to its corresponding /labels/.
+    for split, paths in images.items():
+        (output / f"{split}-images.txt").write_text("\n".join(map(str, paths)) + "\n", encoding="utf-8")
     runtime_yaml = output / "train-data.yaml"
-    runtime_yaml.write_text(f"path: {json.dumps(str(dataset))}\ntrain: images/train\nval: images/val\n"
+    runtime_yaml.write_text(f"path: {json.dumps(str(dataset))}\n"
+                            f"train: {json.dumps(str(output / 'train-images.txt'))}\n"
+                            f"val: {json.dumps(str(output / 'val-images.txt'))}\n"
                             "names:\n  0: ball\n  1: rim\n", encoding="utf-8")
     provenance.update(status="running", elapsed_seconds=elapsed_before, max_hours=max_hours)
     (output / "training.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
@@ -241,6 +283,9 @@ def train_detector(dataset: str | Path, output: str | Path, device: str = "cpu",
                  "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}
         torch.save(state, str(trainer.last) + ".rng.pt")
         provenance["elapsed_seconds"] = elapsed_before + time.perf_counter() - started
+        provenance.update(last_saved_epoch=int(trainer.epoch),
+                          last_checkpoint_sha256=file_hash(trainer.last),
+                          rng_sidecar_sha256=file_hash(str(trainer.last) + ".rng.pt"))
         (output / "training.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
         saved_epochs += 1
         if stop_after_epochs is not None and saved_epochs >= stop_after_epochs:
@@ -254,6 +299,11 @@ def train_detector(dataset: str | Path, output: str | Path, device: str = "cpu",
             torch.set_rng_state(state["torch"])
             if state["cuda"] is not None and torch.cuda.is_available():
                 torch.cuda.set_rng_state_all(state["cuda"])
+            provenance["rng_restored_from_epoch"] = int(state["epoch"])
+            if hasattr(_trainer, "start_epoch"):
+                provenance["resume_start_epoch"] = int(_trainer.start_epoch)
+            if hasattr(_trainer, "optimizer"):
+                provenance["resume_optimizer_state_entries"] = len(_trainer.optimizer.state)
 
     def cap_epochs(trainer):
         # Ultralytics time mode otherwise increases its epoch target after each
@@ -268,7 +318,7 @@ def train_detector(dataset: str | Path, output: str | Path, device: str = "cpu",
     try:
         model.train(data=str(runtime_yaml), epochs=epochs, time=max_hours - elapsed_before / 3600, device=device,
                     project=str(output), name="detector", exist_ok=True, resume=bool(resume),
-                    imgsz=960, batch=2, workers=0, seed=42, deterministic=True,
+                    imgsz=image_size, batch=2, workers=0, seed=42, deterministic=True,
                     save=True, save_period=1, plots=False, cache=False, close_mosaic=0, patience=8)
     except Paused:
         status = "paused"
@@ -282,6 +332,7 @@ def train_detector(dataset: str | Path, output: str | Path, device: str = "cpu",
         raise RuntimeError("Training ended without a recoverable checkpoint. Inspect the cloud run logs.")
     provenance.update(status=status, elapsed_seconds=elapsed_before + time.perf_counter() - started,
                       last_checkpoint=str(last), best_checkpoint=str(best),
+                      last_checkpoint_sha256=file_hash(last),
                       optimizer_rng_resume="YOLO checkpoint plus Python/NumPy/Torch RNG sidecar; verify smoke run")
     (output / "training.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
     return last if status == "paused" else (best if best.exists() else last)

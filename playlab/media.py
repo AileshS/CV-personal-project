@@ -70,9 +70,12 @@ def probe_video(path: str | Path) -> dict:
         raise ValueError(f"Video does not exist: {path}")
     probe = shutil.which("ffprobe")
     if probe:
-        run = subprocess.run([probe, "-v", "error", "-show_format", "-show_streams", "-of", "json",
-                              str(path)], capture_output=True, timeout=30, check=True)
-        data = json.loads(run.stdout)
+        try:
+            run = subprocess.run([probe, "-v", "error", "-show_format", "-show_streams", "-of", "json",
+                                  str(path)], capture_output=True, timeout=30, check=True)
+            data = json.loads(run.stdout)
+        except (subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            raise ValueError("Could not read video metadata. Try exporting a normal MP4.") from exc
         video = next((s for s in data["streams"] if s.get("codec_type") == "video"), None)
         if video is None:
             raise ValueError("This source has no video stream")

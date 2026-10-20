@@ -54,6 +54,7 @@ def perform(store: Store, job: dict):
         result = analyze_possession(store, payload["possession_id"], device=payload.get("device", "cpu"),
                                     weights=payload.get("weights") or None,
                                     model_bundle=payload.get("model_bundle") or None,
+                                    mode=payload.get("mode", "assisted"),
                                     progress=progress, cancelled=cancelled)
         request_attention(store, f"analysis:{payload['possession_id']}:{result.get('id')}",
                           "Shot-analysis evidence is ready. Review uncertain outcomes and defender highlights.")

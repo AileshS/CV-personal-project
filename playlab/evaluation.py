@@ -25,7 +25,7 @@ def _interval(correct, total):
     return [max(0.0, center - margin), min(1.0, center + margin)]
 
 
-def outcome_metrics(gold: list[dict], predictions: list[dict], tolerance: float = 0.5) -> dict:
+def outcome_metrics(gold: list[dict], predictions: list[dict], tolerance: float = 0.5, *, _groups=True) -> dict:
     """Match event IDs or unique nearest release within a possession, then count.
 
     Unknown predictions and undetected shots remain in the coverage denominator.
@@ -33,6 +33,11 @@ def outcome_metrics(gold: list[dict], predictions: list[dict], tolerance: float 
     from result correctness, but never treated as a negative made/missed example.
     """
     eligible = [g for g in gold if g.get("reviewed") is True and g.get("result") in {"made", "missed"}]
+
+    def same_parent(g, p):
+        return all(not (g.get(key) is not None and p.get(key) is not None) or g[key] == p[key]
+                   for key in ("game_id", "possession_id"))
+
     remaining = set(range(len(predictions)))
     matched = []
     # Exact human annotation IDs are optional; automatic events use source time.
@@ -40,7 +45,7 @@ def outcome_metrics(gold: list[dict], predictions: list[dict], tolerance: float 
         candidates = []
         for index in remaining:
             p = predictions[index]
-            if p.get("id") and p.get("id") == g.get("id"):
+            if p.get("id") and p.get("id") == g.get("id") and same_parent(g, p):
                 candidates.append((0, index))
             elif (p.get("possession_id") == g.get("possession_id") and "release" in p and "release" in g
                   and (not p.get("game_id") or p.get("game_id") == g.get("game_id"))):
@@ -85,12 +90,12 @@ def outcome_metrics(gold: list[dict], predictions: list[dict], tolerance: float 
     # Unknown gold can legitimately match a predicted shot event: do not call it
     # a false positive merely because its basket result is unassessable.
     for g in gold:
-        if g.get("result") not in {"made", "missed"}:
+        if g.get("reviewed") is True and g.get("result") not in {"made", "missed"}:
             for index in list(remaining):
                 p = predictions[index]
-                exact = p.get("id") and p.get("id") == g.get("id")
+                exact = p.get("id") and p.get("id") == g.get("id") and same_parent(g, p)
                 near = (p.get("possession_id") == g.get("possession_id") and "release" in p and "release" in g
-                        and abs(float(p["release"]) - float(g["release"])) <= tolerance)
+                        and same_parent(g, p) and abs(float(p["release"]) - float(g["release"])) <= tolerance)
                 if exact or near:
                     remaining.remove(index)
                     break
@@ -99,7 +104,7 @@ def outcome_metrics(gold: list[dict], predictions: list[dict], tolerance: float 
         predicted_count += sum(predictions[i].get("result") == label for i in remaining)
         per_class[label]["precision"] = _rate(confusion[label][label], predicted_count)
     false_positive_outcomes = sum(predictions[i].get("result") in {"made", "missed"} for i in remaining)
-    return {"eligible": len(eligible), "matched": sum(bool(p) for _, p in matched),
+    report = {"eligible": len(eligible), "matched": sum(bool(p) for _, p in matched),
             "emitted": emitted, "correct": correct, "coverage": _rate(emitted, len(eligible)),
             "accuracy_when_emitted": _rate(correct, emitted), "wilson_95": _interval(correct, emitted),
             "accuracy_including_false_positive_events": _rate(correct, emitted + false_positive_outcomes),
@@ -114,6 +119,21 @@ def outcome_metrics(gold: list[dict], predictions: list[dict], tolerance: float 
             "geometry_baseline": {"eligible": len(eligible), "emitted": baseline_emitted,
                                   "correct": baseline_correct, "coverage": _rate(baseline_emitted, len(eligible)),
                                   "accuracy_when_emitted": _rate(baseline_correct, baseline_emitted)}}
+    if _groups:
+        report["by_release_origin"] = {
+            "automatic": outcome_metrics(gold, [p for p in predictions
+                                                 if p.get("origin") == "automatic_rim_approach"],
+                                         tolerance, _groups=False),
+            "human_anchored": outcome_metrics(gold, [p for p in predictions
+                                                     if p.get("origin") == "human_release_anchor"],
+                                             tolerance, _groups=False),
+            "unspecified": outcome_metrics(gold, [p for p in predictions if p.get("origin") not in
+                                                  {"automatic_rim_approach", "human_release_anchor"}],
+                                           tolerance, _groups=False),
+        }
+        report["origin_metrics_note"] = ("Each origin uses the full gold denominator. Automatic events from an assisted "
+                                         "analysis are not an independent end-to-end automatic evaluation.")
+    return report
 
 
 def box_iou(a, b):
@@ -193,7 +213,55 @@ def evaluate_locked(dataset: str | Path, predictions, output: str | Path, freeze
     dataset, output = Path(dataset).resolve(), Path(output).resolve()
     freeze_path = Path(freeze) if freeze else output / "freeze.json"
     manifest, frozen = verify_freeze(dataset, freeze_path)
+    prediction_path = Path(predictions).resolve() if isinstance(predictions, (str, Path)) else None
+    if prediction_path:
+        if str(prediction_path) not in frozen["artifacts"]:
+            raise ValueError("Freeze the prediction JSON with its effective inference configuration before evaluation.")
+        predictions = json.loads(prediction_path.read_text(encoding="utf-8"))
+    else:
+        # The in-memory API must identify exactly the same frozen JSON snapshot.
+        frozen_payload = False
+        for artifact in frozen["artifacts"]:
+            if Path(artifact).suffix.lower() == ".json":
+                try:
+                    frozen_payload |= json.loads(Path(artifact).read_text(encoding="utf-8")) == predictions
+                except (ValueError, UnicodeError):
+                    continue
+        if not frozen_payload:
+            raise ValueError("Freeze the prediction JSON with its effective inference configuration before evaluation.")
+    if not isinstance(predictions, dict) or predictions.get("schema") != 2:
+        raise ValueError("Use the provenance-bearing prediction export, not a raw prediction list.")
+    if predictions.get("dataset_hash") != manifest["dataset_hash"] or predictions.get("split") != "test":
+        raise ValueError("Prediction dataset hash/split must match this held-out test dataset.")
+    mode = predictions.get("analysis_mode")
+    if mode not in {"automatic", "assisted"}:
+        raise ValueError("Predictions must identify automatic or assisted analysis mode.")
+    if not isinstance(predictions.get("inference_artifacts"), dict):
+        raise ValueError("Prediction inference artifact provenance is missing.")
+    provenance, fingerprints = predictions.get("analysis_provenance"), predictions.get("analysis_fingerprints")
+    if not isinstance(provenance, dict) or not isinstance(fingerprints, dict) or provenance.keys() != fingerprints.keys():
+        raise ValueError("Prediction analysis provenance/fingerprints are missing or inconsistent.")
+    if any(not isinstance(dependencies, dict) or dependencies.get("mode") != mode
+           or canonical_hash(dependencies)[:24] != fingerprints[possession_id]
+           for possession_id, dependencies in provenance.items()):
+        raise ValueError("Prediction analysis mode/fingerprint does not match its inference configuration.")
+    if any(predictions["inference_artifacts"].get(path) != digest
+           for dependencies in provenance.values() for path, digest in dependencies.get("artifacts", {}).items()):
+        raise ValueError("Prediction model artifacts disagree with its analysis provenance.")
+    if any(frozen["artifacts"].get(path) != digest
+           for path, digest in predictions["inference_artifacts"].items()):
+        raise ValueError("Every inference model/bundle must match an artifact in the frozen run.")
+    events = predictions.get("events")
+    if not isinstance(events, list):
+        raise ValueError("Predictions must contain an events list.")
+    if any(p.get("possession_id") not in provenance for p in events):
+        raise ValueError("Every predicted event needs its saved analysis provenance.")
+    if mode == "automatic" and any(p.get("origin") != "automatic_rim_approach" for p in events):
+        raise ValueError("Automatic evaluation cannot contain human release anchors or unspecified origins.")
     records = json.loads((dataset / "records.json").read_text(encoding="utf-8"))
+    parents = {(r["game_id"], r["possession_id"]) for r in records if r.get("split") == "test"}
+    if any((p.get("game_id"), p.get("possession_id")) not in parents for p in events):
+        raise ValueError("Predictions contain a game/possession outside the test split.")
     gold = [r for r in records if r.get("kind") == "shot" and r.get("split") == "test"]
     if not gold:
         raise ValueError("No held-out test shots. Keep pilot/development results separate.")
@@ -205,14 +273,11 @@ def evaluate_locked(dataset: str | Path, predictions, output: str | Path, freeze
             json.dump({"freeze_hash": frozen["freeze_hash"], "status": "consumed"}, stream)
     except FileExistsError as exc:
         raise ValueError("This frozen run already consumed its locked test. Do not tune/retest it.") from exc
-    if isinstance(predictions, (str, Path)):
-        predictions = json.loads(Path(predictions).read_text(encoding="utf-8"))
-    if isinstance(predictions, dict):
-        predictions = predictions.get("events", predictions.get("shots", []))
-    predictions = [p for p in predictions if p.get("type", "shot") == "shot"]
-    report = outcome_metrics(gold, predictions)
+    events = [p for p in events if p.get("type", "shot") == "shot"]
+    report = outcome_metrics(gold, events)
     report.update(dataset_hash=manifest["dataset_hash"], freeze_hash=frozen["freeze_hash"],
-                  prediction_hash=canonical_hash(predictions), test_used_for_selection=False,
+                  prediction_hash=canonical_hash(predictions), test_used_for_selection=False, analysis_mode=mode,
+                  end_to_end_automatic=mode == "automatic",
                   limitations="Pilot counts only; unsupported rare classes and abstentions remain explicit.")
     (output / "test-report.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
     return report

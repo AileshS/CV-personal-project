@@ -3,7 +3,8 @@ import json
 import numpy as np
 import pytest
 
-from playlab.dataset import export_dataset, validate_splits, verify_dataset
+from playlab.analysis import analysis_dependencies
+from playlab.dataset import canonical_hash, export_dataset, validate_splits, verify_dataset
 from playlab.store import Store
 
 
@@ -80,16 +81,50 @@ def test_unreviewed_box_on_reviewed_frame_is_not_silently_omitted(tmp_path):
 
 def test_features_from_analysis_never_replace_human_result(tmp_path):
     store = Store(tmp_path / "db")
-    game(store)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"explicit fixture; no decoding in shot-only export")
+    game(store, source_path=str(source))
+    store.save("possession", {"id": "p", "game_id": "g", "start": 0, "end": 100, "split": "train"})
     store.save("shot", {"id": "human", "game_id": "g", "possession_id": "p", "release": 20,
                         "result": "missed", "reviewed": True, "split": "train"})
-    store.save("analysis", {"id": "p", "events": [{"id": "pred", "type": "shot", "release": 20.1,
+    dependencies = analysis_dependencies(store, "p")
+    store.save("analysis", {"id": "p", "possession_id": "p", "status": "complete", "analysis_mode": "assisted",
+                         "dependencies": dependencies, "fingerprint": canonical_hash(dependencies)[:24],
+                         "events": [{"id": "pred", "type": "shot", "release": 20.1,
                          "result": "made", "features": {"observation_count": 8, "below_x": None}}]})
     destination = export_dataset(store, tmp_path / "v1")
     shot = json.loads((destination / "records.json").read_text())[0]
     assert shot["result"] == "missed"
     assert shot["features"]["observation_count"] == 8
     assert shot["features_source"]["event_id"] == "pred"
+
+
+def test_embedded_stale_features_and_legacy_predictions_are_removed(tmp_path):
+    store = Store(tmp_path / "db")
+    game(store)
+    store.save("shot", {"id": "s", "game_id": "g", "possession_id": "p", "release": 20,
+                        "result": "made", "reviewed": True, "split": "train",
+                        "features": {"observation_count": 99}, "features_source": {"analysis_fingerprint": "old"}})
+    store.save("analysis", {"id": "p", "status": "complete", "stale": True,
+                            "events": [{"id": "old", "type": "shot", "release": 20,
+                                        "features": {"observation_count": 99}}]})
+    destination = export_dataset(store, tmp_path / "version")
+    shot, = json.loads((destination / "records.json").read_text())
+    assert "features" not in shot and "features_source" not in shot
+    assert shot["features_status"] == "missing_or_stale_analysis"
+
+
+def test_dataset_rejects_unmanifested_images(tmp_path):
+    store = Store(tmp_path / "db")
+    game(store)
+    store.save("shot", {"id": "s", "game_id": "g", "possession_id": "p", "release": 20,
+                        "result": "made", "reviewed": True, "split": "train"})
+    destination = export_dataset(store, tmp_path / "version")
+    image_dir = destination / "images" / "train"
+    image_dir.mkdir(parents=True)
+    (image_dir / "unlisted.png").write_bytes(b"unlisted")
+    with pytest.raises(ValueError, match="Unmanifested"):
+        verify_dataset(destination)
 
 
 def test_invalid_box_coordinates_fail_before_export(tmp_path):

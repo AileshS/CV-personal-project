@@ -8,25 +8,33 @@ from pathlib import Path
 
 from PIL import Image
 
+from playlab.analysis import analysis_is_fresh, analysis_record_id
 from playlab.dataset import file_hash, verify_dataset
 from playlab.evaluation import detection_metrics, verify_freeze
 
 
-def predict_dataset(store, dataset: str | Path, output: str | Path, split="test") -> Path:
+def predict_dataset(store, dataset: str | Path, output: str | Path, split="test", mode="automatic") -> Path:
     """Export saved predictions only; human outcomes never appear in this file."""
     dataset, output = Path(dataset).resolve(), Path(output).resolve()
     manifest = verify_dataset(dataset)
     if split not in {"train", "val", "test"}:
         raise ValueError("Expected train, val or test split.")
+    analysis_record_id("", mode)
     records = json.loads((dataset / "records.json").read_text(encoding="utf-8"))
     parents = {(r["game_id"], r["possession_id"]) for r in records if r["split"] == split}
-    events, missing, fingerprints = [], [], {}
+    events, missing, fingerprints, provenance = [], [], {}, {}
+    artifacts = {}
     for game_id, possession_id in sorted(parents):
-        analysis = store.get("analysis", possession_id)
-        if not analysis or analysis.get("stale") or analysis.get("status") != "complete":
+        analysis = store.get("analysis", analysis_record_id(possession_id, mode))
+        if not analysis_is_fresh(store, analysis):
             missing.append(possession_id)
             continue
+        parent = store.get("possession", possession_id)
+        if parent["game_id"] != game_id or parent.get("split") != split:
+            raise ValueError("Live possession identity/split differs from the exported dataset.")
         fingerprints[possession_id] = analysis.get("fingerprint")
+        provenance[possession_id] = analysis["dependencies"]
+        artifacts.update(analysis["dependencies"]["artifacts"])
         for event in analysis.get("events", []):
             if event.get("type") != "shot" or event.get("source") != "prediction":
                 continue
@@ -36,9 +44,11 @@ def predict_dataset(store, dataset: str | Path, output: str | Path, split="test"
                             result=event.get("predicted_result", event.get("result", "unknown")),
                             defender=event.get("defender"), analysis_fingerprint=analysis.get("fingerprint"))
             events.append(exported)
-    payload = {"dataset_hash": manifest["dataset_hash"], "split": split, "events": events,
+    payload = {"schema": 2, "dataset_hash": manifest["dataset_hash"], "split": split, "events": events,
+               "analysis_mode": mode, "analysis_provenance": provenance, "inference_artifacts": artifacts,
                "missing_analysis_possessions": missing, "analysis_fingerprints": fingerprints,
-               "limitations": "Missing analyses remain missed events in evaluation. Human release anchors are explicit."}
+               "limitations": "Missing analyses remain missed events in evaluation. Human release anchors are explicit. "
+                              "Freeze this prediction JSON together with all used model/configuration artifacts."}
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as stream:
         json.dump(payload, stream, indent=2, allow_nan=False)
@@ -75,7 +85,8 @@ def benchmark_detector(dataset: str | Path, weights: str | Path, output: str | P
         if not freeze or not config:
             raise ValueError("Locked detector test needs --freeze and a frozen JSON --config.")
         verify_freeze(dataset, freeze, required_artifacts=[weights, baseline_weights, config])
-    paths = sorted((dataset / "images" / split).glob("*.png"))
+    paths = sorted(dataset / relative for relative in manifest["files"]
+                   if Path(relative).parts[:2] == ("images", split) and Path(relative).suffix == ".png")
     if not paths:
         raise ValueError(f"No reviewed {split} images, including negative frames, are available.")
     os.environ.setdefault("YOLO_CONFIG_DIR", str(model_directory.parent / "ultralytics"))

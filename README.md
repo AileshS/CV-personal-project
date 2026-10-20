@@ -32,6 +32,16 @@ does not claim those are trained basketball detections or classify their shots.
 Use `uv run --extra vision` consistently after installing that extra, because a
 plain `uv run` can remove optional dependencies when syncing the environment.
 
+Choose release assistance explicitly in the viewer or CLI:
+
+```sh
+uv run playlab analyze POSSESSION_ID --mode automatic --queue
+uv run playlab analyze POSSESSION_ID --mode assisted --queue
+```
+
+Automatic mode ignores human shot anchors entirely. Assisted mode uses saved
+release anchors. Their cached predictions and evaluation reports stay separate.
+
 Full sources are imported by local path or YouTube URL. The viewer queues long
 operations; it does not analyze the whole game on a widget rerun. Games,
 annotations, results and job checkpoints persist in `data/playlab.sqlite`.
@@ -50,9 +60,9 @@ Mark complete frames as reviewed, including every visible ball/rim, or explicitl
 mark a negative frame. Exporting partial labels is rejected.
 
 ```sh
-uv run playlab export artifacts/datasets/v1
+uv run --extra vision playlab export artifacts/datasets/v1
 uv run --extra vision playlab train-detector artifacts/datasets/v1 artifacts/runs/detector-1 --device 0
-uv run playlab train-classifier artifacts/datasets/v1 artifacts/runs/classifier-1
+uv run --extra vision playlab train-classifier artifacts/datasets/v1 artifacts/runs/classifier-1
 ```
 
 Detector training is capped at two hours per candidate and three candidates per
@@ -63,6 +73,12 @@ is retained when validation does not favor the learned classifier.
 The Colab notebook under `notebooks/` prepares SHA-pinned code/dataset packages,
 saves outputs to Google Drive, and gates longer training on checkpoint recovery.
 No actual GPU training or real-game accuracy evaluation has been completed.
+
+See [annotation and batch review](docs/ANNOTATION.md) and
+[training, checkpoint recovery and evaluation](docs/TRAINING.md) for the complete
+workflow. A real CPU checkpoint-resume smoke on artificial images has completed;
+it is software evidence only. See [cloud continuation results](CLOUD_REPORT.md)
+for measured checks, artifact hashes and remaining blockers.
 
 ## Current handoff
 
