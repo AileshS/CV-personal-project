@@ -15,6 +15,8 @@ from PIL import Image, ImageDraw
 
 from playlab.analysis import analysis_is_fresh
 from playlab.attention import resolve_attention
+from playlab.box_drawer import draw_frame
+from playlab.dataset import canonical_hash
 from playlab.domain import (
     assign_game_split,
     assign_split_blocks,
@@ -57,7 +59,7 @@ def show_frame(game: dict, seconds: float, boxes=()):
             if box and len(box) == 4:
                 coords = [box[0] * image.width, box[1] * image.height,
                           box[2] * image.width, box[3] * image.height]
-                color = ("#00d5ff" if item.get("draft") else
+                color = ("#00d5ff" if item.get("draft") else "#ff8d54" if item.get("proposal") else
                          "#ffbd45" if item.get("label") == "ball" else "#17b7a2")
                 draw.rectangle(coords, outline=color, width=3)
                 name = item.get("label", "box")
@@ -305,43 +307,88 @@ else:
             frame_id = f"{possession_id}:{seconds:.3f}"
             reviewed_frame = store.get("frame", frame_id)
             image_slot = st.container()
+            input_mode = st.radio("Box input", ["Click on frame", "Coordinate fields"], horizontal=True,
+                                  key="box_input_mode")
             st.caption(f"Saved boxes: {len(boxes)} · Frame {'reviewed' if reviewed_frame and reviewed_frame['reviewed'] else 'not reviewed'}")
             box_lookup = {b["id"]: b for b in boxes}
             box_id = st.selectbox("Box to edit", ["new", *box_lookup], key=f"box_choice_{frame_id}",
                                   format_func=lambda key: "New box" if key == "new" else f"{box_lookup[key]['label']} · {key[:8]}")
             old_box = box_lookup.get(box_id, {})
             draft_key = f"box_draft_saved_{frame_id}_{box_id}"
+            drawn_key = f"box_draft_drawn_{frame_id}_{box_id}"
+            pending_key = f"box_pending_proposal_{frame_id}_{box_id}"
             reload_key = f"box_draft_reload_{frame_id}_{box_id}"
             if st.session_state.pop(reload_key, False):
                 fresh = {"label": old_box.get("label", "ball"), "box": old_box.get("box", [.4, .3, .5, .4])}
                 st.session_state[draft_key] = fresh
+                st.session_state[drawn_key] = False
+                st.session_state.pop(pending_key, None)
                 st.session_state[f"box_{frame_id}_{box_id}_label"] = fresh["label"]
                 for i, value in enumerate(fresh["box"]):
                     st.session_state[f"box_{frame_id}_{box_id}_{i}"] = float(value)
             label = st.selectbox("Object", ["ball", "rim"], index=1 if old_box.get("label") == "rim" else 0,
                                  key=f"box_{frame_id}_{box_id}_label")
-            st.caption("Your unsaved box is cyan. Adjust Left/Top/Right/Bottom, then press Enter or leave the field "
-                       "to update the preview. Coordinates run from 0 to 1; halfway across is 0.5.")
-            coordinates = box_inputs(f"box_{frame_id}_{box_id}", old_box.get("box"))
+            st.caption("Your unsaved box is cyan. Select Ball or Rim, then click two opposite corners around it. "
+                       "Save reviewed box keeps it; drawing alone saves no label.")
+            with st.expander("Fine-tune coordinates", expanded=input_mode == "Coordinate fields"):
+                coordinates = box_inputs(f"box_{frame_id}_{box_id}", old_box.get("box"))
             valid_draft = (all(math.isfinite(v) and 0 <= v <= 1 for v in coordinates)
                            and coordinates[0] < coordinates[2] and coordinates[1] < coordinates[3])
             baseline = st.session_state.setdefault(draft_key, {
                 "label": old_box.get("label", "ball"), "box": old_box.get("box", [.4, .3, .5, .4])})
-            draft_changed = label != baseline["label"] or coordinates != baseline["box"]
+            draft_changed = (label != baseline["label"] or coordinates != baseline["box"]
+                             or st.session_state.get(drawn_key, False))
 
             def discard_draft():
+                st.session_state[drawn_key] = False
+                st.session_state.pop(pending_key, None)
                 st.session_state[f"box_{frame_id}_{box_id}_label"] = baseline["label"]
                 for i, value in enumerate(baseline["box"]):
                     st.session_state[f"box_{frame_id}_{box_id}_{i}"] = float(value)
 
             preview_boxes = [b for b in boxes if b["id"] != box_id]
-            if valid_draft:
+            has_visible_draft = (input_mode == "Coordinate fields" or box_id != "new" or draft_changed
+                                 or st.session_state.get(drawn_key, False))
+            if valid_draft and has_visible_draft:
                 preview_boxes.append({"label": label, "box": coordinates, "draft": True})
-            else:
+            elif not valid_draft:
                 st.warning("The draft box needs Left < Right and Top < Bottom. It has not been saved.")
+            if context := st.session_state.get("review_frame_selection"):
+                try:
+                    shown_batch = load_batch(context["path"])
+                    shown_selection = frame_selection(store, shown_batch, context["frame_id"])
+                    if shown_selection["possession_id"] == possession_id and abs(shown_selection["time"] - seconds) < .0005:
+                        for index, suggestion in enumerate(shown_batch.frames[context["frame_id"]].get("proposed_boxes", [])):
+                            identifier = canonical_hash([shown_batch.id, context["frame_id"], possession_id, index])[:24]
+                            if not store.get("proposal_decision", identifier):
+                                preview_boxes.append({"label": f"{index + 1}: {suggestion['label']}",
+                                                      "box": suggestion["box"], "proposal": True})
+                except (ValueError, OSError, KeyError):
+                    pass  # The link error is explained beside the review controls below.
             with image_slot:
-                show_frame(game, seconds, preview_boxes)
-            save_box = st.button("Save reviewed box", key="save_box", disabled=not valid_draft)
+                if input_mode == "Coordinate fields":
+                    show_frame(game, seconds, preview_boxes)
+                else:
+                    image_path = Path(game["source_path"])
+                    if image_path.is_file():
+                        drawer_key = f"draw_box_{frame_id}_{box_id}"
+
+                        def take_drawn_box():
+                            state = st.session_state[drawer_key]
+                            drawn = state.get("box") if isinstance(state, dict) else state.box
+                            if (isinstance(drawn, (list, tuple)) and len(drawn) == 4
+                                    and all(isinstance(v, (int, float)) and math.isfinite(v) and 0 <= v <= 1 for v in drawn)
+                                    and drawn[0] < drawn[2] and drawn[1] < drawn[3]):
+                                for i, value in enumerate(drawn):
+                                    st.session_state[f"box_{frame_id}_{box_id}_{i}"] = float(value)
+                                st.session_state[drawn_key] = True
+
+                        draw_frame(review_frame(str(image_path), seconds, image_path.stat().st_mtime),
+                                   preview_boxes, identity=f"{frame_id}:{box_id}:{label}",
+                                   key=drawer_key, on_box_change=take_drawn_box)
+                    else:
+                        st.info("Restore the original source video to draw on this frame.")
+            save_box = st.button("Save reviewed box", key="save_box", disabled=not valid_draft or not has_visible_draft)
             if draft_changed:
                 st.info("Save this box or discard its changes before reviewing the complete frame. "
                         "Moving the preview does not save a label.")
@@ -381,6 +428,71 @@ else:
                                 collections=[("box", {"possession_id": possession_id}, snapshot["boxes"])])
                 snapshots.pop(edit_key, None)
 
+            if context := st.session_state.get("review_frame_selection"):
+                try:
+                    proposal_batch = load_batch(context["path"])
+                    proposal_selection = frame_selection(store, proposal_batch, context["frame_id"])
+                    if (proposal_selection["possession_id"] == possession_id
+                            and abs(proposal_selection["time"] - seconds) < .0005):
+                        suggestions = proposal_batch.frames[context["frame_id"]].get("proposed_boxes", [])
+                        st.subheader("Check model suggestions")
+                        st.caption("Accept only a correctly placed box. Reject records a bad suggestion; it does not mark a negative frame. "
+                                   "Add missing objects with the click tool before reviewing the complete frame.")
+                        if not suggestions:
+                            st.info("No model suggestions at this timestamp. Use the click tool to add visible objects.")
+                        for index, suggestion in enumerate(suggestions):
+                            identifier = canonical_hash([proposal_batch.id, context["frame_id"], possession_id, index])[:24]
+                            accepted_id = f"suggested_{identifier}"
+                            decision = store.get("proposal_decision", identifier)
+                            status = (decision or {}).get("decision", "unreviewed")
+                            st.caption(f"Suggestion {index + 1}: {suggestion['label']} · {suggestion['confidence']:.0%} · {status}")
+                            controls = st.columns(3)
+                            accepted = controls[0].button("👍 Accept box", key=f"accept_{identifier}",
+                                disabled=draft_changed or store.get("box", accepted_id) is not None)
+                            rejected = controls[1].button("👎 Reject box", key=f"reject_{identifier}",
+                                disabled=draft_changed or store.get("box", accepted_id) is not None or status == "rejected")
+
+                            pending = {"id": identifier, "batch_hash": proposal_batch.id,
+                                       "frame_id": context["frame_id"], "proposal_index": index,
+                                       "decision_revision": (decision or {}).get("revision", 0)}
+
+                            def correct_suggestion(item=suggestion, correction=pending):
+                                st.session_state[f"box_choice_{frame_id}"] = "new"
+                                st.session_state[f"box_{frame_id}_new_label"] = item["label"]
+                                st.session_state[f"box_draft_drawn_{frame_id}_new"] = True
+                                st.session_state[f"box_pending_proposal_{frame_id}_new"] = correction
+                                for i, value in enumerate(item["box"]):
+                                    st.session_state[f"box_{frame_id}_new_{i}"] = float(value)
+
+                            controls[2].button("Correct box", key=f"correct_{identifier}", on_click=correct_suggestion,
+                                               disabled=store.get("box", accepted_id) is not None)
+                            if accepted or rejected:
+                                action = {"id": identifier, "batch_hash": proposal_batch.id,
+                                          "frame_id": context["frame_id"], "game_id": game["id"],
+                                          "possession_id": possession_id, "time": seconds, "proposal_index": index,
+                                          "decision": "accepted" if accepted else "rejected", "source": "human"}
+                                changes = [("proposal_decision", action, (decision or {}).get("revision", 0))]
+                                if accepted:
+                                    box = validate_annotation(store, "box", {
+                                        "id": accepted_id, "game_id": game["id"], "possession_id": possession_id,
+                                        "time": seconds, "split": possession["split"], "label": suggestion["label"],
+                                        "box": suggestion["box"], "reviewed": True, "proposal_ref": identifier})
+                                    changes.append(("box", box, 0))
+                                    if reviewed_frame:
+                                        changes.append(("frame", {**reviewed_frame, "reviewed": False}, snapshot["frame_revision"]))
+                                try:
+                                    if draft_changed:
+                                        raise ValueError("Save or discard the current draft first.")
+                                    write_frame(changes)
+                                    flash("Suggestion accepted. Check remaining objects before reviewing the frame." if accepted else
+                                          "Suggestion rejected. Other objects may still need labels.")
+                                except ValueError as exc:
+                                    st.error(str(exc))
+                    else:
+                        st.caption("Model suggestions apply to the batch's exact sampled timestamp. Reopen it from Review batches.")
+                except (ValueError, OSError, KeyError) as exc:
+                    st.info(f"Model suggestion review unavailable: {exc}")
+
             remove_review = delete_selected = complete = negative = False
             with st.container(horizontal=True):
                 if reviewed_frame:
@@ -391,17 +503,29 @@ else:
                 negative = st.button("Reviewed negative: no ball or rim", key="negative_frame", disabled=bool(boxes) or draft_changed)
             try:
                 if save_box:
+                    if not valid_draft or not has_visible_draft:
+                        raise ValueError("Draw a valid visible box before saving.")
                     record = {"game_id": game["id"], "possession_id": possession_id, "time": seconds,
                               "label": label, "box": coordinates, "split": possession["split"]}
                     if old_box:
                         record["id"] = old_box["id"]
+                    pending = st.session_state.get(pending_key)
+                    if pending and not old_box:
+                        record.update(id=f"suggested_{pending['id']}", proposal_ref=pending["id"])
                     record = validate_annotation(store, "box", {**record, "reviewed": True})
                     changes = [("box", record, snapshot["box_revision"])]
+                    if pending and not old_box:
+                        decision = {k: v for k, v in pending.items() if k != "decision_revision"}
+                        decision.update(game_id=game["id"], possession_id=possession_id,
+                                        time=seconds, source="human", decision="corrected")
+                        changes.append(("proposal_decision", decision, pending["decision_revision"]))
                     if reviewed_frame:
                         changes.append(("frame", {**reviewed_frame, "reviewed": False, "negative": False},
                                         snapshot["frame_revision"]))
                     write_frame(changes)
                     st.session_state[draft_key] = {"label": label, "box": list(coordinates)}
+                    st.session_state[drawn_key] = False
+                    st.session_state.pop(pending_key, None)
                     flash("Box saved. Mark the complete frame reviewed when all boxes are correct.")
                 if remove_review:
                     write_frame(deletes=[("frame", frame_id, snapshot["frame_revision"])])
@@ -413,6 +537,8 @@ else:
                     write_frame(changes, deletes=[("box", old_box["id"], snapshot["box_revision"])])
                     flash("Box deleted. Review the frame again before exporting training data.")
                 if complete or negative:
+                    if draft_changed:
+                        raise ValueError("Save or discard the current draft before reviewing the frame.")
                     record = validate_annotation(store, "frame", {"id": frame_id, "game_id": game["id"],
                         "possession_id": possession_id, "time": seconds, "negative": negative,
                         "split": possession["split"], "reviewed": True})

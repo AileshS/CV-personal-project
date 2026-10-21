@@ -104,6 +104,7 @@ def test_explicit_confirmation_exact_prefill_and_human_save(batch_desk):
     time_input = next(n for n in at.number_input if n.label == "Frame time (game seconds)")
     assert time_input.value == batch.frames[frame_id]['time']
     assert not store.list("box") and not store.list("frame")
+    at.radio(key="box_input_mode").set_value("Coordinate fields").run()
     at.button(key="save_box").click().run()
     assert not at.exception
     assert store.list("box")[0]['time'] == batch.frames[frame_id]['time']
@@ -121,6 +122,7 @@ def test_stale_frame_editor_cannot_overwrite_concurrent_labels(batch_desk):
     store, _ = batch_desk
     at = AppTest.from_file(str(APP), default_timeout=15).run()
     at.selectbox(key="workspace").set_value("Frame labels").run()
+    at.radio(key="box_input_mode").set_value("Coordinate fields").run()
     # Another reviewer adds a box after this editor was rendered.
     store.save("box", {"id": "other", "game_id": "g", "possession_id": "p", "time": 0.,
                        "label": "rim", "box": [.1, .1, .2, .2], "split": "train", "reviewed": True})
@@ -128,6 +130,59 @@ def test_stale_frame_editor_cannot_overwrite_concurrent_labels(batch_desk):
     assert not at.exception
     assert any("changed elsewhere" in e.value for e in at.error)
     assert [b['id'] for b in store.list("box")] == ['other']
+
+
+def proposed_frame_editor(batch_desk):
+    import json
+
+    from playlab.dataset import canonical_hash
+
+    store, batch = batch_desk
+    manifest = batch.manifest
+    first = manifest['frames'][0]
+    first['proposed_boxes'] = [
+        {'label': 'ball', 'box': [.1, .1, .2, .2], 'confidence': .8, 'reviewed': False, 'source': 'model_proposal'},
+        {'label': 'rim', 'box': [.6, .6, .7, .7], 'confidence': .7, 'reviewed': False, 'source': 'model_proposal'}]
+    manifest['batch_hash'] = canonical_hash({k: v for k, v in manifest.items() if k != 'batch_hash'})
+    (batch.root / 'manifest.json').write_text(json.dumps(manifest))
+    batch = load_batch(batch.root)
+    at = browser(batch)
+    for control in at.number_input:
+        if control.label == 'Corrected possession start (source seconds)':
+            control.set_value(first['time'] - 1)
+        if control.label == 'Corrected possession end (source seconds)':
+            control.set_value(first['time'] + 1)
+    next(c for c in at.checkbox if c.label.startswith('I reviewed the whole possession')).check()
+    at.button(key='confirm_review_possession').click().run()
+    at.button(key='open_review_frame').click().run()
+    assert not at.exception
+    return store, batch, at
+
+
+def test_accept_reject_proposals_never_auto_review_complete_frame(batch_desk):
+    store, batch, at = proposed_frame_editor(batch_desk)
+    next(b for b in at.button if b.key.startswith('reject_')).click().run()
+    assert not at.exception and not store.list('box') and not store.list('frame')
+    assert store.list('proposal_decision')[0]['decision'] == 'rejected'
+    next(b for b in at.button if b.key.startswith('accept_') and 'Accept' in b.label and not b.disabled).click().run()
+    assert not at.exception
+    assert len(store.list('box')) == 1 and not store.list('frame')
+    assert all(not r['reviewed'] for r in load_batch(batch.root).manifest['frames'])
+
+
+def test_correcting_proposal_resolves_it_without_duplicate_accept(batch_desk):
+    store, _, at = proposed_frame_editor(batch_desk)
+    next(b for b in at.button if b.key.startswith('correct_')).click().run()
+    assert not at.exception and not store.list('box')
+    assert at.button(key='save_box').disabled is False
+    next(n for n in at.number_input if n.label == 'Left').set_value(.12).run()
+    at.button(key='save_box').click().run()
+    assert not at.exception and len(store.list('box')) == 1
+    decision = store.list('proposal_decision')[0]
+    assert decision['decision'] == 'corrected'
+    assert store.list('box')[0]['proposal_ref'] == decision['id']
+    assert at.button(key=f"accept_{decision['id']}").disabled
+    assert not store.list('frame')
 
 
 def test_stale_correction_notes_require_reload(batch_desk):
@@ -147,6 +202,7 @@ def test_changed_possession_blocks_stale_frame_edit(batch_desk):
     store, _ = batch_desk
     at = AppTest.from_file(str(APP), default_timeout=15).run()
     at.selectbox(key="workspace").set_value("Frame labels").run()
+    at.radio(key="box_input_mode").set_value("Coordinate fields").run()
     possession = store.get("possession", "p")
     store.save("possession", {**possession, "end": 119.})
     at.button(key="save_box").click().run()

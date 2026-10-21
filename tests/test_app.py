@@ -128,6 +128,7 @@ def test_draft_box_is_visible_before_explicit_save(desk, monkeypatch):
     monkeypatch.setattr(st, "image", capture_image)
     at = app()
     at.selectbox(key="workspace").set_value("Frame labels").run()
+    at.radio(key="box_input_mode").set_value("Coordinate fields").run()
     assert images[-1].getpixel((128, 63)) == (0, 213, 255)
     at.number_input(key="box_pos1:10.000_new_0").set_value(.25).run()
     assert not at.exception
@@ -148,6 +149,7 @@ def test_draft_box_is_visible_before_explicit_save(desk, monkeypatch):
 def test_saved_box_requires_complete_frame_review_and_prevents_negative(desk):
     at = app()
     at.selectbox(key="workspace").set_value("Frame labels").run()
+    at.radio(key="box_input_mode").set_value("Coordinate fields").run()
     at.button(key="save_box").click().run()
     assert not at.exception
     assert len(desk.list("box")) == 1
@@ -157,6 +159,14 @@ def test_saved_box_requires_complete_frame_review_and_prevents_negative(desk):
     assert not at.exception
     assert desk.list("frame")[0]["reviewed"]
     assert desk.list("frame")[0]["negative"] is False
+
+
+def test_click_mode_cannot_save_an_invisible_default_box(desk):
+    at = app()
+    at.selectbox(key="workspace").set_value("Frame labels").run()
+    assert at.radio(key="box_input_mode").value == "Click on frame"
+    assert at.button(key="save_box").disabled
+    assert desk.list("box") == [] and desk.list("frame") == []
 
 
 def test_reload_after_concurrent_box_edit_refreshes_preview_coordinates(desk):
@@ -230,6 +240,7 @@ def test_pilot_blocks_guard_boundaries_and_preserve_unassigned_gaps(desk):
 def test_negative_review_can_be_removed_before_positive_annotation(desk):
     at = app()
     at.selectbox(key="workspace").set_value("Frame labels").run()
+    at.radio(key="box_input_mode").set_value("Coordinate fields").run()
     at.button(key="negative_frame").click().run()
     at.button(key="remove_frame_review").click().run()
     at.button(key="save_box").click().run()
