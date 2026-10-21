@@ -5,6 +5,13 @@ possessions, analyzes selected possessions for made/missed shots, and suggests
 the closest visible opposing player at release using approximate image distance.
 Foul and turnover labels are manual. Predictions remain review-required.
 
+Start in **Quick analysis**: open a video, choose a short interval, select
+**Analyze interval**, and inspect individual shot results and evidence. No manual
+possession cutting, frame picking or box labeling is required. Analysis clips are
+separate from verified possessions and human training labels. See
+[the product guide](docs/QUICK_ANALYSIS.md) and
+[the latest product handoff](QUICK_ANALYSIS_REPORT.md).
+
 For the review-batch workspace and safe local integration steps, read
 [docs/REVIEW_WORKSPACE.md](docs/REVIEW_WORKSPACE.md). The preceding local results
 are in [LOCAL_REPORT.md](LOCAL_REPORT.md). Code fetches do not transfer local videos,
@@ -15,17 +22,18 @@ SQLite data, weights or the unreviewed frame archive.
 Python 3.12 and [uv](https://docs.astral.sh/uv/) are required.
 
 ```sh
-uv sync --locked
-uv run streamlit run app.py
+uv sync --locked --extra vision
+uv run --extra vision streamlit run app.py
 ```
 
 Run the processing worker in a second terminal:
 
 ```sh
-uv run playlab worker
+uv run --extra vision playlab worker
 ```
 
-Install actual neural detection separately:
+For CPU development without neural inference, use `uv sync --locked` and omit
+`--extra vision` consistently. To restore the pretrained runtime:
 
 ```sh
 uv sync --locked --extra vision

@@ -26,6 +26,7 @@ from playlab.domain import (
     validate_annotation,
 )
 from playlab.media import frame_at
+from playlab.quick_analysis_ui import render_quick_analysis
 from playlab.review import frame_selection, load_batch
 from playlab.review_ui import render_review_batches
 from playlab.store import Store
@@ -95,15 +96,17 @@ def box_inputs(prefix: str, value=None) -> list[float]:
 
 st.set_page_config(page_title="Basketball play lab", page_icon=":material/sports_basketball:", layout="wide")
 st.title("Basketball play lab")
-st.caption("Review possessions, build verified training data, and inspect evidence before trusting a result.")
+st.caption("Analyze a short interval and inspect the evidence. Detailed review remains available.")
 store = Store(os.environ.get("PLAYLAB_DATA", "data"))
+if "quick_imported_game" in st.session_state:
+    st.session_state["game_choice"] = st.session_state.pop("quick_imported_game")
 
 if "notice" in st.session_state:
     st.success(st.session_state.pop("notice"))
 
 with st.sidebar:
     st.subheader("Review desk")
-    view = st.selectbox("Workspace", ["Possessions", "Review batches", "Frame labels", "Game setup", "Import game", "Jobs and export"],
+    view = st.selectbox("Workspace", ["Quick analysis", "Possessions", "Review batches", "Frame labels", "Game setup", "Import game", "Jobs and export"],
                         key="workspace")
     games = store.list("game")
     game_lookup = {g["id"]: g for g in games}
@@ -122,7 +125,10 @@ with st.sidebar:
 game = game_lookup.get(selected_game)
 possessions = sorted(store.list("possession", game_id=selected_game), key=lambda item: item["start"]) if game else []
 
-if view == "Import game":
+if view == "Quick analysis":
+    render_quick_analysis(store, game, clock)
+
+elif view == "Import game":
     st.subheader("Import a game")
     st.write("Enter a full local video path or a YouTube URL. Import runs in the worker and keeps original timestamps.")
     with st.form("import_game"):

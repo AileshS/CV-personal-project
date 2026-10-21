@@ -52,6 +52,9 @@ def perform(store: Store, job: dict):
     elif task == "review_clip":
         from playlab.review_clips import perform_review_clip
         result = perform_review_clip(store, payload, cancelled=cancelled, progress=progress)
+    elif task == "analyze_clip":
+        from playlab.quick_analysis import perform_analysis_clip
+        result = perform_analysis_clip(store, payload, cancelled=cancelled, progress=progress)
     elif task == "analyze":
         from playlab.analysis import analyze_possession
         result = analyze_possession(store, payload["possession_id"], device=payload.get("device", "cpu"),

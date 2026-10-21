@@ -55,6 +55,9 @@ def analysis_dependencies(store, possession_id, *, mode="assisted", weights=None
     artifact_state = _artifact_versions(weights, model_bundle)
     return {"version": 6, "mode": mode, "device": str(device),
             "source": _file_version(game["source_path"]), "game_id": game["id"],
+            "source_offset_seconds": game.get("source_offset_seconds", 0),
+            "source_provenance": game.get("source_provenance", game.get("provenance")),
+            "interval_context": game.get("quick_analysis_context"),
             "start": float(possession["start"]), "end": float(possession["end"]),
             "possession_revision": possession.get("revision"),
             "setup": store.get("setup", game["id"]) or {}, "anchors": anchors,
@@ -177,7 +180,7 @@ def _shooter(players, observations, release, explicit=None):
     return ranked[0][2].get("track_id")
 
 
-def _evidence(source, at, players, shooter, defender, destination):
+def _evidence(source, at, players, shooter, defender, destination, source_offset_seconds=0):
     frame = frame_at(source, at, max_width=1280)
     image = Image.fromarray(frame)
     draw = ImageDraw.Draw(image)
@@ -188,7 +191,7 @@ def _evidence(source, at, players, shooter, defender, destination):
             draw.rectangle(player["bbox"], outline=color, width=3)
             draw.text((player["bbox"][0], max(0, player["bbox"][1] - 15)),
                       "Shooter" if track == shooter else "Closest visible opponent", fill=color)
-    draw.text((12, 12), f"Source {at:.2f}s | approximate image-space evidence", fill="white")
+    draw.text((12, 12), f"Source {at + source_offset_seconds:.2f}s | approximate image-space evidence", fill="white")
     destination.parent.mkdir(parents=True, exist_ok=True)
     image.save(destination)
     return str(destination.resolve())
@@ -363,9 +366,13 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
             if candidate["origin"] != "human_release_anchor" and defender.get("status") == "approximate":
                 defender["release_unconfirmed"] = True
                 defender["reason"] = "Suggested at an estimated release; confirm the release and highlighted shooter."
+                if game.get("quick_analysis_context"):
+                    defender = {"status": "unknown", "reason": "Release and shooter require review."}
         image_path = store.root / "evidence" / fingerprint / f"{len(events):04d}.png"
         evidence = _evidence(game["source_path"], release_frame["time"], release_frame["players"],
-                             shooter, defender, image_path)
+                             shooter, defender, image_path,
+                             **({"source_offset_seconds": game["source_offset_seconds"]}
+                                if game.get("source_offset_seconds") else {}))
         events.append({**candidate, "type": "shot", "time": release, "release": release,
                        "game_id": game["id"], "possession_id": possession_id,
                        "release_confirmed": candidate["origin"] == "human_release_anchor",

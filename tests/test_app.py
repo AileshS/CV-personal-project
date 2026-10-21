@@ -27,6 +27,7 @@ def desk(tmp_path, monkeypatch):
 
 def app():
     at = AppTest.from_file(str(APP), default_timeout=15).run()
+    at.selectbox(key="workspace").set_value("Possessions").run()
     assert not at.exception
     return at
 
