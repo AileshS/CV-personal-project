@@ -126,13 +126,9 @@ def execute(args):
         from playlab.analysis import analyze_possession
         return analyze_possession(store, **payload)
     if command == "worker":
-        from playlab.worker import run_worker
+        from playlab.worker import recover_worker, run_worker
         if args.recover:
-            # User explicitly confirms the old worker is stopped. Never auto-recover active work.
-            lock = store.root / ".worker.lock"
-            if lock.exists():
-                lock.unlink()
-            store.recover_interrupted()
+            recover_worker(store)
         run_worker(store, once=args.once)
         return {"status": "worker exited"}
     if command == "status":

@@ -72,6 +72,29 @@ evidence preserve original elapsed time, not the scoreboard clock.
 
 ## What a result means
 
+### Inspect frames and detector boxes
+
+Under an analysis interval, enable **Show frame inspector**. In **Any frame**,
+use the frame slider or Previous/Next frame, then select **Detect this frame**.
+This runs a fresh diagnostic on that frame only, including for older results;
+it does not save verified labels. Boxes and detector scores appear when the
+model reports candidates. No detection is shown explicitly. Scores are not
+confidence intervals or calibrated probabilities. The default COCO model has
+no rim class, so it cannot provide predicted rim boxes or rim scores.
+
+New analyses retain raw **Saved model samples**, approximately ten per second,
+even when shot results are unknown. These are distinct from native frame steps.
+Saved samples are hidden when their result is stale. Original source timestamps
+and native image dimensions are displayed. Frame stepping is approximate for
+variable-frame-rate footage. Optional basket hints are visibly separate from
+model predictions and have no detector confidence.
+
+If a job stays queued, check the worker terminal and select **Refresh analysis
+status**. The viewer reports a confirmed stopped worker. Recovery refuses to
+remove a live or unverifiable worker's lock. Start the worker with the same
+data directory; use `worker --recover` only after confirming the old worker
+has stopped.
+
 The existing COCO pretrained model detects people and balls, **not rims**.
 Without dependable basket evidence it cannot establish a rim crossing, and may
 produce no supported shot proposals. The product must show **unknown / review

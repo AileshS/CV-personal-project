@@ -158,3 +158,33 @@ def test_safe_import_provenance_idempotence_and_conflict(tmp_path, monkeypatch):
     manifest.write_text(json.dumps(provenance))
     with pytest.raises(ValueError, match="SHA-256"):
         import_quick_source(store, source, provenance_path=manifest)
+
+
+def test_frame_inspector_old_result_supports_single_frame_without_reanalysis(quick, monkeypatch):
+    import numpy as np
+
+    import playlab.detection_inspector_ui as ui
+    store, _ = quick
+    at = browser()
+    at.button(key="quick_analyze").click().run()
+    clip = store.list("analysis_clip")[0]
+    monkeypatch.setattr(ui, "_native_frame", lambda *a: np.zeros((180, 320, 3), dtype=np.uint8))
+    calls = []
+    def predict(*args):
+        calls.append(args[2])
+        return {"time": args[2], "width": 320, "height": 180, "detector_mode": "pretrained_coco_ball",
+                "raw_detections": {"balls": [{"bbox": [10, 20, 30, 40], "confidence": .75}], "rims": []}}
+    monkeypatch.setattr(ui, "_predict_frame", predict)
+    key = f"inspect_{clip['id']}"
+    at.checkbox(key=key+"_show").check().run()
+    assert not at.exception
+    assert any("no saved predictions" in m.value for m in at.info)
+    at.button(key=key+"_detect").click().run()
+    assert not at.exception and calls == [0.]
+    assert any("unsupported" in m.value for m in at.info)
+    at.button(key=key+"_next").click().run()
+    assert not at.exception and calls == [0.]
+    assert at.slider(key=key+"_frame").value == 1
+    assert any("no saved predictions" in m.value for m in at.info)
+    assert len(store.jobs()) == 1
+    assert store.list("box") == [] and store.list("frame") == []

@@ -291,6 +291,8 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                 if at < chunk_start:
                     continue
                 chunk_frames.append({"time": float(at), "players": players, "rim": rim,
+                                     "raw_detections": {key: detections.get(key, []) for key in ("balls", "rims")},
+                                     "width": width, "height": height, "detector_mode": detector.mode,
                                      "view_changed": bool(view_changed)})
                 balls = detections.get("balls", [])
                 if balls:

@@ -5,8 +5,10 @@ from pathlib import Path
 
 import streamlit as st
 
+from playlab.detection_inspector_ui import render_detection_inspector
 from playlab.quick_analysis import get_analysis_clip, queue_analysis_clip
 from playlab.quick_import import import_quick_source
+from playlab.worker import worker_status
 
 
 def _import(store, source, **metadata):
@@ -108,6 +110,9 @@ def render_quick_analysis(store, game, clock):
     if job.get("error"):
         st.error(job["error"])
     if job.get("status") in {"queued", "running"}:
+        status = worker_status(store)
+        if status["state"] == "stopped":
+            st.warning("The analysis worker is stopped. This request stays queued until the worker is restarted in its separate terminal.")
         if st.button("Cancel analysis", key="quick_cancel"):
             store.cancel_job(job["id"])
             st.rerun()
@@ -119,6 +124,7 @@ def render_quick_analysis(store, game, clock):
             except ValueError as exc:
                 st.error(str(exc))
     result = clip.get("result")
+    render_detection_inspector(store, game, clip, result, fresh=bool(clip.get("fresh")))
     if not result:
         st.info("Results appear here when the worker finishes. No result is available yet.")
         return
