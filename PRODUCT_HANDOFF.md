@@ -1,5 +1,13 @@
 # Next milestone: a usable clip-analysis product
 
+**Latest objective:** the default product is now a ten-second ball/rim tracking
+video. The user explicitly prioritized one simple screen: choose the interval,
+Analyze, and obtain playable/downloadable video with boxes and detector scores.
+Bulk labeling and fine-tuning remain deferred. See `docs/TRACKED_VIDEO.md` and the
+new `TRACKING_VIDEO_REPORT.md` for the implemented flow and actual verification.
+The historical Quick analysis plan below explains the preceding implementation;
+it must not make annotation or shot-outcome evidence a prerequisite for boxes.
+
 The user has confirmed that drawing boxes is quicker, but possession cutting and
 frame selection still take too much time. Their latest priority is to ship a
 usable product sooner and fine-tune later. Pause the large manual labeling batch.

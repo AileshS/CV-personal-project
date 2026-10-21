@@ -1,7 +1,6 @@
-"""A small review desk. Long-running work belongs to ``playlab worker``.
+"""Short tracking videos first; detailed review stays behind Advanced tools.
 
-Only one requested frame is decoded here. Full-game importing, clipping,
-indexing and model inference are queued; widget reruns never load models.
+Full-game importing, clipping, indexing and model inference run in the worker.
 """
 from __future__ import annotations
 
@@ -30,6 +29,7 @@ from playlab.quick_analysis_ui import render_quick_analysis
 from playlab.review import frame_selection, load_batch
 from playlab.review_ui import render_review_batches
 from playlab.store import Store
+from playlab.tracking_video_ui import render_tracking_video
 
 SPLITS = ["unassigned", "train", "val", "test"]
 SPLIT_NAMES = {"unassigned": "Unassigned", "train": "Training", "val": "Validation", "test": "Final test"}
@@ -96,8 +96,14 @@ def box_inputs(prefix: str, value=None) -> list[float]:
 
 st.set_page_config(page_title="Basketball play lab", page_icon=":material/sports_basketball:", layout="wide")
 st.title("Basketball play lab")
-st.caption("Analyze a short interval and inspect the evidence. Detailed review remains available.")
 store = Store(os.environ.get("PLAYLAB_DATA", "data"))
+with st.sidebar:
+    advanced = st.checkbox("Advanced tools", key="advanced_tools")
+if not advanced:
+    render_tracking_video(store, clock)
+    st.stop()
+
+st.caption("Analyze a short interval and inspect the evidence. Detailed review remains available.")
 if "quick_imported_game" in st.session_state:
     st.session_state["game_choice"] = st.session_state.pop("quick_imported_game")
 

@@ -1,5 +1,11 @@
 # Quick analysis
 
+This earlier shot-evidence workspace is now under **Advanced tools**. The default
+screen is the simpler ten-second ball/rim video flow in
+[TRACKED_VIDEO.md](TRACKED_VIDEO.md); it uses a compatible basketball/hoop model
+and returns scored boxes on playable video. The COCO limitations below describe
+this advanced workspace, not the new default tracking product.
+
 Start with a short video interval, run inference, and inspect each proposed shot
 and its evidence. Possession cutting, frame selection, box labeling and dataset
 partitioning are not prerequisites. Analysis intervals are not verified whole

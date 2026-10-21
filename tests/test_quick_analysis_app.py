@@ -26,6 +26,7 @@ def quick(tmp_path, monkeypatch):
 
 def browser():
     at = AppTest.from_file(str(APP), default_timeout=15).run()
+    at.checkbox(key="advanced_tools").check().run()
     assert not at.exception
     return at
 

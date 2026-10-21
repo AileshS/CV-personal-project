@@ -5,12 +5,14 @@ possessions, analyzes selected possessions for made/missed shots, and suggests
 the closest visible opposing player at release using approximate image distance.
 Foul and turnover labels are manual. Predictions remain review-required.
 
-Start in **Quick analysis**: open a video, choose a short interval, select
-**Analyze interval**, and inspect individual shot results and evidence. No manual
-possession cutting, frame picking or box labeling is required. Analysis clips are
-separate from verified possessions and human training labels. See
-[the product guide](docs/QUICK_ANALYSIS.md) and
-[the latest product handoff](QUICK_ANALYSIS_REPORT.md).
+The default screen is **Track a 10-second clip**: choose a video and start time,
+select **Analyze**, then play or download the video with ball/rim boxes and detector
+scores. The worker starts automatically. No labeling, possession cutting or basket
+setup is required. See [the tracking-video guide](docs/TRACKED_VIDEO.md).
+
+The earlier Quick analysis and detailed annotation workspaces remain available
+behind **Advanced tools**. They are separate from the detection-video product.
+Made/missed recognition remains unverified; rendering boxes is not an outcome claim.
 
 For the review-batch workspace and safe local integration steps, read
 [docs/REVIEW_WORKSPACE.md](docs/REVIEW_WORKSPACE.md). The preceding local results
@@ -26,7 +28,8 @@ uv sync --locked --extra vision
 uv run --extra vision streamlit run app.py
 ```
 
-Run the processing worker in a second terminal:
+The tracking screen starts its worker when you select Analyze. For the advanced
+workspaces, a worker can also be started manually in a second terminal:
 
 ```sh
 uv run --extra vision playlab worker
@@ -48,8 +51,8 @@ plain `uv run` can remove optional dependencies when syncing the environment.
 Choose release assistance explicitly in the viewer or CLI:
 
 ```sh
-uv run playlab analyze POSSESSION_ID --mode automatic --queue
-uv run playlab analyze POSSESSION_ID --mode assisted --queue
+uv run --extra vision playlab analyze POSSESSION_ID --mode automatic --queue
+uv run --extra vision playlab analyze POSSESSION_ID --mode assisted --queue
 ```
 
 Automatic mode ignores human shot anchors entirely. Assisted mode uses saved

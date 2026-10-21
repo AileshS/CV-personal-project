@@ -33,6 +33,7 @@ def batch_desk(tmp_path, monkeypatch):
 
 def browser(batch):
     at = AppTest.from_file(str(APP), default_timeout=15).run()
+    at.checkbox(key="advanced_tools").check().run()
     at.selectbox(key="workspace").set_value("Review batches").run()
     at.text_input(key="review_manifest_path").set_value(str(batch.root / "manifest.json"))
     at.button(key="load_review_batch").click().run()
@@ -55,6 +56,7 @@ def test_navigation_notes_survive_restart_and_never_accept_suggestions(batch_des
     at.button(key="save_review_notes").click().run()
     assert not at.exception
     restarted = AppTest.from_file(str(APP), default_timeout=15).run()
+    restarted.checkbox(key="advanced_tools").check().run()
     restarted.selectbox(key="workspace").set_value("Review batches").run()
     assert not restarted.exception
     assert restarted.selectbox(key="review_frame").value == second
@@ -113,6 +115,7 @@ def test_explicit_confirmation_exact_prefill_and_human_save(batch_desk):
     assert store.list("frame")[0]['reviewed']
     assert store.get("possession", target_id)['end'] - store.get("possession", target_id)['start'] == 2
     restarted = AppTest.from_file(str(APP), default_timeout=15).run()
+    restarted.checkbox(key="advanced_tools").check().run()
     assert not restarted.exception
     assert Store(store.root).list("frame")[0]['reviewed']
     assert not store.jobs()
@@ -121,6 +124,7 @@ def test_explicit_confirmation_exact_prefill_and_human_save(batch_desk):
 def test_stale_frame_editor_cannot_overwrite_concurrent_labels(batch_desk):
     store, _ = batch_desk
     at = AppTest.from_file(str(APP), default_timeout=15).run()
+    at.checkbox(key="advanced_tools").check().run()
     at.selectbox(key="workspace").set_value("Frame labels").run()
     at.radio(key="box_input_mode").set_value("Coordinate fields").run()
     # Another reviewer adds a box after this editor was rendered.
@@ -201,6 +205,7 @@ def test_stale_correction_notes_require_reload(batch_desk):
 def test_changed_possession_blocks_stale_frame_edit(batch_desk):
     store, _ = batch_desk
     at = AppTest.from_file(str(APP), default_timeout=15).run()
+    at.checkbox(key="advanced_tools").check().run()
     at.selectbox(key="workspace").set_value("Frame labels").run()
     at.radio(key="box_input_mode").set_value("Coordinate fields").run()
     possession = store.get("possession", "p")

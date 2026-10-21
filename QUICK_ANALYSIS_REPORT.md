@@ -1,5 +1,11 @@
 # Quick analysis product handoff
 
+Historical report for the earlier shot-evidence flow. The current default product
+is **choose ten seconds → Analyze → tracked ball/rim video**; see
+[TRACKING_VIDEO_REPORT.md](TRACKING_VIDEO_REPORT.md) for actual browser/model
+verification and [docs/TRACKED_VIDEO.md](docs/TRACKED_VIDEO.md) for startup. The
+older Quick analysis workspace remains available under Advanced tools.
+
 Base: `local/basketball-pilot-20261020`, verified exact commit
 `27d60e16e070e8a56291e2529d8465a8ae515f7c`.
 Work branch: `cloud/quick-analysis-product`.
