@@ -284,3 +284,39 @@ def test_initial_default_model_download_is_captured_without_marking_result_stale
     result = analysis.analyze_possession(store, "p")
     assert result["stale"] is False
     assert analysis.analysis_is_fresh(store, result)
+
+
+def test_missing_optional_weights_allow_honest_fallback_export_and_freeze(tmp_path, fake_video, monkeypatch):
+    import json
+
+    from playlab.benchmark import predict_dataset
+    from playlab.dataset import export_dataset
+    from playlab.evaluation import evaluate_locked, freeze_run
+
+    store = fixture_store(tmp_path)
+    missing = tmp_path / "offline-models" / "yolo11n.pt"
+    monkeypatch.setattr(analysis, "_default_model_path", lambda: missing)
+    monkeypatch.setattr(analysis, "_vision_version", lambda: "installed-test-runtime")
+
+    def offline_detector(*args):
+        raise RuntimeError("Optional pretrained weights are unavailable offline")
+
+    monkeypatch.setattr(analysis, "BasketballDetector", offline_detector)
+    monkeypatch.setattr(analysis, "shot_proposals", lambda observations: [1.0])
+    result = analysis.analyze_possession(store, "p", mode="automatic")
+    assert result["dependencies"]["artifacts"] == {}
+    assert result["dependencies"]["unavailable_artifacts"] == [str(missing)]
+    assert analysis.analysis_is_fresh(store, result)
+    assert result["events"][0]["predicted_result"] == "unknown"
+    store.save("shot", {"id": "gold", "game_id": "g", "possession_id": "p", "release": 1.,
+                        "result": "made", "reviewed": True, "split": "test",
+                        "context_start": 0., "context_end": 5.})
+    dataset = export_dataset(store, tmp_path / "dataset")
+    predictions = predict_dataset(store, dataset, tmp_path / "predictions.json")
+    assert json.loads(predictions.read_text())["inference_artifacts"] == {}
+    freeze = freeze_run(dataset, [predictions], tmp_path / "freeze")
+    report = evaluate_locked(dataset, predictions, tmp_path / "report", freeze)
+    assert report["eligible"] == 1 and report["emitted"] == 0
+    missing.parent.mkdir()
+    missing.write_bytes(b"newly available weights")
+    assert not analysis.analysis_is_fresh(store, result)

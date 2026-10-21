@@ -5,6 +5,10 @@ possessions, analyzes selected possessions for made/missed shots, and suggests
 the closest visible opposing player at release using approximate image distance.
 Foul and turnover labels are manual. Predictions remain review-required.
 
+For the latest local results and the next cloud task, read
+[LOCAL_REPORT.md](LOCAL_REPORT.md). Code fetches do not transfer local videos,
+SQLite data, weights or the unreviewed frame archive.
+
 ## Start locally
 
 Python 3.12 and [uv](https://docs.astral.sh/uv/) are required.

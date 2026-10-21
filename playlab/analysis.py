@@ -52,14 +52,19 @@ def analysis_dependencies(store, possession_id, *, mode="assisted", weights=None
                 for p in store.list("shot", possession_id=possession_id)
                 if p.get("reviewed") is True] if mode == "assisted" else [])
     source = Path(__file__).parent
-    return {"version": 5, "mode": mode, "device": str(device),
+    artifact_state = _artifact_versions(weights, model_bundle)
+    return {"version": 6, "mode": mode, "device": str(device),
             "source": _file_version(game["source_path"]), "game_id": game["id"],
             "start": float(possession["start"]), "end": float(possession["end"]),
             "possession_revision": possession.get("revision"),
             "setup": store.get("setup", game["id"]) or {}, "anchors": anchors,
             "weights": str(Path(weights).resolve()) if weights else None,
             "model_bundle": str(Path(model_bundle).resolve()) if model_bundle else None,
-            "artifacts": _artifact_versions(weights, model_bundle), "vision_version": _vision_version(),
+            # Missing optional weights are availability state, not files used
+            # by diagnostic inference. They cannot be hashed into a freeze.
+            "artifacts": {path: digest for path, digest in artifact_state.items() if digest != "missing"},
+            "unavailable_artifacts": sorted(path for path, digest in artifact_state.items() if digest == "missing"),
+            "vision_version": _vision_version(),
             "code_hash": canonical_hash({p.name: file_hash(p) for p in
                                          (source / "analysis.py", source / "detectors.py", source / "features.py")})}
 
@@ -248,9 +253,10 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                 default_model = _default_model_path()
                 requested = {str(Path(p).resolve()) for p in (weights, model_bundle) if p}
                 if (str(default_model) not in requested
-                        and dependencies["artifacts"].get(str(default_model)) == "missing"
+                        and str(default_model) in dependencies["unavailable_artifacts"]
                         and default_model.is_file()):
                     dependencies["artifacts"][str(default_model)] = file_hash(default_model)
+                    dependencies["unavailable_artifacts"].remove(str(default_model))
             detector.reset()
             chunk_start, chunk_end = start + index * 20, min(end, start + (index + 1) * 20)
             chunk_rows, chunk_frames = [], []
