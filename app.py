@@ -6,6 +6,7 @@ indexing and model inference are queued; widget reruns never load models.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -56,9 +57,12 @@ def show_frame(game: dict, seconds: float, boxes=()):
             if box and len(box) == 4:
                 coords = [box[0] * image.width, box[1] * image.height,
                           box[2] * image.width, box[3] * image.height]
-                color = "#ffbd45" if item.get("label") == "ball" else "#17b7a2"
+                color = ("#00d5ff" if item.get("draft") else
+                         "#ffbd45" if item.get("label") == "ball" else "#17b7a2")
                 draw.rectangle(coords, outline=color, width=3)
-                draw.text((coords[0], max(0, coords[1] - 15)), item.get("label", "box"), fill=color)
+                name = item.get("label", "box")
+                draw.text((coords[0], max(0, coords[1] - 15)),
+                          f"Draft {name}" if item.get("draft") else name, fill=color)
         st.image(image, caption=f"Original-game time {clock(seconds)}",
                  alt="Basketball review frame with saved ball and rim boxes", width="stretch")
     except (OSError, RuntimeError, ValueError) as exc:
@@ -300,17 +304,48 @@ else:
             boxes = [b for b in store.list("box", possession_id=possession_id) if same_frame(b)]
             frame_id = f"{possession_id}:{seconds:.3f}"
             reviewed_frame = store.get("frame", frame_id)
-            show_frame(game, seconds, boxes)
+            image_slot = st.container()
             st.caption(f"Saved boxes: {len(boxes)} · Frame {'reviewed' if reviewed_frame and reviewed_frame['reviewed'] else 'not reviewed'}")
             box_lookup = {b["id"]: b for b in boxes}
             box_id = st.selectbox("Box to edit", ["new", *box_lookup], key=f"box_choice_{frame_id}",
                                   format_func=lambda key: "New box" if key == "new" else f"{box_lookup[key]['label']} · {key[:8]}")
             old_box = box_lookup.get(box_id, {})
-            with st.form(f"box_{frame_id}_{box_id}"):
-                label = st.selectbox("Object", ["ball", "rim"], index=1 if old_box.get("label") == "rim" else 0)
-                st.caption("Use normalized frame coordinates. For example, halfway across is 0.5.")
-                coordinates = box_inputs(f"box_{frame_id}_{box_id}", old_box.get("box"))
-                save_box = st.form_submit_button("Save reviewed box", key="save_box")
+            draft_key = f"box_draft_saved_{frame_id}_{box_id}"
+            reload_key = f"box_draft_reload_{frame_id}_{box_id}"
+            if st.session_state.pop(reload_key, False):
+                fresh = {"label": old_box.get("label", "ball"), "box": old_box.get("box", [.4, .3, .5, .4])}
+                st.session_state[draft_key] = fresh
+                st.session_state[f"box_{frame_id}_{box_id}_label"] = fresh["label"]
+                for i, value in enumerate(fresh["box"]):
+                    st.session_state[f"box_{frame_id}_{box_id}_{i}"] = float(value)
+            label = st.selectbox("Object", ["ball", "rim"], index=1 if old_box.get("label") == "rim" else 0,
+                                 key=f"box_{frame_id}_{box_id}_label")
+            st.caption("Your unsaved box is cyan. Adjust Left/Top/Right/Bottom, then press Enter or leave the field "
+                       "to update the preview. Coordinates run from 0 to 1; halfway across is 0.5.")
+            coordinates = box_inputs(f"box_{frame_id}_{box_id}", old_box.get("box"))
+            valid_draft = (all(math.isfinite(v) and 0 <= v <= 1 for v in coordinates)
+                           and coordinates[0] < coordinates[2] and coordinates[1] < coordinates[3])
+            baseline = st.session_state.setdefault(draft_key, {
+                "label": old_box.get("label", "ball"), "box": old_box.get("box", [.4, .3, .5, .4])})
+            draft_changed = label != baseline["label"] or coordinates != baseline["box"]
+
+            def discard_draft():
+                st.session_state[f"box_{frame_id}_{box_id}_label"] = baseline["label"]
+                for i, value in enumerate(baseline["box"]):
+                    st.session_state[f"box_{frame_id}_{box_id}_{i}"] = float(value)
+
+            preview_boxes = [b for b in boxes if b["id"] != box_id]
+            if valid_draft:
+                preview_boxes.append({"label": label, "box": coordinates, "draft": True})
+            else:
+                st.warning("The draft box needs Left < Right and Top < Bottom. It has not been saved.")
+            with image_slot:
+                show_frame(game, seconds, preview_boxes)
+            save_box = st.button("Save reviewed box", key="save_box", disabled=not valid_draft)
+            if draft_changed:
+                st.info("Save this box or discard its changes before reviewing the complete frame. "
+                        "Moving the preview does not save a label.")
+                st.button("Discard box changes", key="discard_box_draft", on_click=discard_draft)
             # Keep the revisions that produced the displayed editor across the submit rerun.
             edit_key = f"{game['id']}:{possession_id}:{seconds:.3f}:{box_id}"
             current_snapshot = {
@@ -333,6 +368,7 @@ else:
             snapshot = snapshots.setdefault(edit_key, current_snapshot)
             if st.button("Reload frame editor", key="reload_frame_editor"):
                 snapshots[edit_key] = current_snapshot
+                st.session_state[reload_key] = True
                 st.rerun()
             if linked_error:
                 st.warning(f"Review link needs reconfirmation: {linked_error}")
@@ -351,8 +387,8 @@ else:
                     remove_review = st.button("Remove frame review label", key="remove_frame_review")
                 if old_box:
                     delete_selected = st.button("Delete selected box", key="delete_box")
-                complete = st.button("Mark complete frame reviewed", key="review_frame", disabled=not boxes)
-                negative = st.button("Reviewed negative: no ball or rim", key="negative_frame", disabled=bool(boxes))
+                complete = st.button("Mark complete frame reviewed", key="review_frame", disabled=not boxes or draft_changed)
+                negative = st.button("Reviewed negative: no ball or rim", key="negative_frame", disabled=bool(boxes) or draft_changed)
             try:
                 if save_box:
                     record = {"game_id": game["id"], "possession_id": possession_id, "time": seconds,
@@ -365,6 +401,7 @@ else:
                         changes.append(("frame", {**reviewed_frame, "reviewed": False, "negative": False},
                                         snapshot["frame_revision"]))
                     write_frame(changes)
+                    st.session_state[draft_key] = {"label": label, "box": list(coordinates)}
                     flash("Box saved. Mark the complete frame reviewed when all boxes are correct.")
                 if remove_review:
                     write_frame(deletes=[("frame", frame_id, snapshot["frame_revision"])])

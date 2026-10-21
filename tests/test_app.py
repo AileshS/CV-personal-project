@@ -108,10 +108,41 @@ def test_invalid_box_cannot_become_training_label(desk):
     at.selectbox(key="workspace").set_value("Frame labels").run()
     at.number_input(key="box_pos1:10.000_new_0").set_value(0.8)
     at.number_input(key="box_pos1:10.000_new_2").set_value(0.2)
+    at.run()
+    assert not at.exception
+    assert at.button(key="save_box").disabled
+    assert any("Left < Right" in message.value for message in at.warning)
+    assert desk.list("box") == []
+
+
+def test_draft_box_is_visible_before_explicit_save(desk, monkeypatch):
+    import streamlit as st
+
+    images = []
+    original_image = st.image
+
+    def capture_image(image, **kwargs):
+        images.append(image.copy())
+        return original_image(image, **kwargs)
+
+    monkeypatch.setattr(st, "image", capture_image)
+    at = app()
+    at.selectbox(key="workspace").set_value("Frame labels").run()
+    assert images[-1].getpixel((128, 63)) == (0, 213, 255)
+    at.number_input(key="box_pos1:10.000_new_0").set_value(.25).run()
+    assert not at.exception
+    assert images[-1].getpixel((80, 63)) == (0, 213, 255)
+    assert images[-1].getpixel((128, 63)) == (0, 0, 0)
+    assert desk.list("box") == [] and desk.list("frame") == []
+    assert at.button(key="negative_frame").disabled
+    at.button(key="discard_box_draft").click().run()
+    assert not at.button(key="negative_frame").disabled
+    at.number_input(key="box_pos1:10.000_new_0").set_value(.25).run()
     at.button(key="save_box").click().run()
     assert not at.exception
-    assert at.error
-    assert desk.list("box") == []
+    assert desk.list("box")[0]["box"] == [.25, .3, .5, .4]
+    assert desk.list("frame") == []
+    assert not at.button(key="review_frame").disabled
 
 
 def test_saved_box_requires_complete_frame_review_and_prevents_negative(desk):
@@ -126,6 +157,23 @@ def test_saved_box_requires_complete_frame_review_and_prevents_negative(desk):
     assert not at.exception
     assert desk.list("frame")[0]["reviewed"]
     assert desk.list("frame")[0]["negative"] is False
+
+
+def test_reload_after_concurrent_box_edit_refreshes_preview_coordinates(desk):
+    saved = desk.save("box", {"id": "other", "game_id": "game1", "possession_id": "pos1", "time": 10.,
+                             "label": "ball", "box": [.1, .1, .2, .2], "split": "unassigned", "reviewed": True})
+    at = app()
+    at.selectbox(key="workspace").set_value("Frame labels").run()
+    at.selectbox(key="box_choice_pos1:10.000").set_value("other").run()
+    desk.save("box", {**saved, "label": "rim", "box": [.6, .6, .7, .7]})
+    at.button(key="reload_frame_editor").click().run()
+    assert not at.exception
+    assert at.selectbox(key="box_pos1:10.000_other_label").value == "rim"
+    assert [at.number_input(key=f"box_pos1:10.000_other_{i}").value for i in range(4)] == [.6, .6, .7, .7]
+    assert not at.button(key="review_frame").disabled
+    at.button(key="review_frame").click().run()
+    assert not at.exception and desk.list("frame")[0]["reviewed"]
+    assert desk.get("box", "other")["box"] == [.6, .6, .7, .7]
 
 
 def test_cancel_and_resume_job_from_review_desk(desk):
