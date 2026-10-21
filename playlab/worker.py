@@ -49,6 +49,9 @@ def perform(store: Store, job: dict):
         result = store.save("clip", {"id": possession["id"], "possession_id": possession["id"],
                                     "path": str(path), "possession_revision": possession["revision"],
                                     "start": possession["start"], "end": possession["end"], "stale": False})
+    elif task == "review_clip":
+        from playlab.review_clips import perform_review_clip
+        result = perform_review_clip(store, payload, cancelled=cancelled, progress=progress)
     elif task == "analyze":
         from playlab.analysis import analyze_possession
         result = analyze_possession(store, payload["possession_id"], device=payload.get("device", "cpu"),

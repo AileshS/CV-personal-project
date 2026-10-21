@@ -5,8 +5,9 @@ possessions, analyzes selected possessions for made/missed shots, and suggests
 the closest visible opposing player at release using approximate image distance.
 Foul and turnover labels are manual. Predictions remain review-required.
 
-For the latest local results and the next cloud task, read
-[LOCAL_REPORT.md](LOCAL_REPORT.md). Code fetches do not transfer local videos,
+For the review-batch workspace and safe local integration steps, read
+[docs/REVIEW_WORKSPACE.md](docs/REVIEW_WORKSPACE.md). The preceding local results
+are in [LOCAL_REPORT.md](LOCAL_REPORT.md). Code fetches do not transfer local videos,
 SQLite data, weights or the unreviewed frame archive.
 
 ## Start locally
@@ -49,6 +50,11 @@ release anchors. Their cached predictions and evaluation reports stay separate.
 Full sources are imported by local path or YouTube URL. The viewer queues long
 operations; it does not analyze the whole game on a widget rerun. Games,
 annotations, results and job checkpoints persist in `data/playlab.sqlite`.
+
+Choose **Review batches** to navigate a versioned review manifest, inspect
+unreviewed suggestions and save human boundary corrections before opening frame
+labels. Thumbnail-only previews support browsing; labeling requires matching local
+source assets. Loading a batch never imports a game or accepts its suggestions.
 
 ## Training and testing
 

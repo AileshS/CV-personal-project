@@ -23,6 +23,8 @@ from playlab.domain import (
     validate_annotation,
 )
 from playlab.media import frame_at
+from playlab.review import frame_selection, load_batch
+from playlab.review_ui import render_review_batches
 from playlab.store import Store
 
 SPLITS = ["unassigned", "train", "val", "test"]
@@ -95,7 +97,7 @@ if "notice" in st.session_state:
 
 with st.sidebar:
     st.subheader("Review desk")
-    view = st.selectbox("Workspace", ["Possessions", "Frame labels", "Game setup", "Import game", "Jobs and export"],
+    view = st.selectbox("Workspace", ["Possessions", "Review batches", "Frame labels", "Game setup", "Import game", "Jobs and export"],
                         key="workspace")
     games = store.list("game")
     game_lookup = {g["id"]: g for g in games}
@@ -170,10 +172,14 @@ elif view == "Jobs and export":
                         st.error(str(exc))
     st.caption("After an interrupted worker, stop its old process and run the documented recovery command before resuming.")
     records = {kind: store.list(kind) for kind in
-               ["game", "possession", "shot", "box", "frame", "event", "setup", "analysis", "attention"]}
+               ["game", "possession", "shot", "box", "frame", "event", "setup", "analysis", "attention",
+                "review_batch", "review_item", "review_frame", "review_clip"]}
     st.download_button("Download review records", data=json.dumps(records, indent=2),
                        file_name="basketball-review.json", mime="application/json", key="export_records")
     st.caption("This download contains labels and predictions separately. Videos and model weights stay outside the export.")
+
+elif view == "Review batches":
+    render_review_batches(store, clock)
 
 elif game is None:
     st.info("Start with Import game. Nothing has been trained or evaluated yet.")
@@ -305,37 +311,79 @@ else:
                 st.caption("Use normalized frame coordinates. For example, halfway across is 0.5.")
                 coordinates = box_inputs(f"box_{frame_id}_{box_id}", old_box.get("box"))
                 save_box = st.form_submit_button("Save reviewed box", key="save_box")
-            if save_box:
+            # Keep the revisions that produced the displayed editor across the submit rerun.
+            edit_key = f"{game['id']}:{possession_id}:{seconds:.3f}:{box_id}"
+            current_snapshot = {
+                "checks": [("possession", possession_id, possession["revision"]),
+                           ("game", game["id"], game["revision"])],
+                "frame_revision": reviewed_frame["revision"] if reviewed_frame else 0,
+                "box_revision": old_box.get("revision", 0),
+                "boxes": {b["id"]: b["revision"] for b in store.list("box", possession_id=possession_id)},
+            }
+            linked_error = None
+            if context := st.session_state.get("review_frame_selection"):
                 try:
+                    selection = frame_selection(store, load_batch(context["path"]), context["frame_id"])
+                    if selection["possession_id"] == possession_id:
+                        current_snapshot["checks"].append((selection.get("review_kind", "review_item"), selection["review_item_id"],
+                                                           selection["review_revision"]))
+                except (ValueError, OSError) as exc:
+                    linked_error = str(exc)
+            snapshots = st.session_state.setdefault("frame_edit_snapshots", {})
+            snapshot = snapshots.setdefault(edit_key, current_snapshot)
+            if st.button("Reload frame editor", key="reload_frame_editor"):
+                snapshots[edit_key] = current_snapshot
+                st.rerun()
+            if linked_error:
+                st.warning(f"Review link needs reconfirmation: {linked_error}")
+
+            def write_frame(changes=(), deletes=()):
+                if linked_error:
+                    raise ValueError("Review link changed. Return to Review batches and explicitly reconfirm it.")
+                store.save_many(changes, checks=[*snapshot["checks"], ("frame", frame_id, snapshot["frame_revision"])],
+                                deletes=deletes,
+                                collections=[("box", {"possession_id": possession_id}, snapshot["boxes"])])
+                snapshots.pop(edit_key, None)
+
+            remove_review = delete_selected = complete = negative = False
+            with st.container(horizontal=True):
+                if reviewed_frame:
+                    remove_review = st.button("Remove frame review label", key="remove_frame_review")
+                if old_box:
+                    delete_selected = st.button("Delete selected box", key="delete_box")
+                complete = st.button("Mark complete frame reviewed", key="review_frame", disabled=not boxes)
+                negative = st.button("Reviewed negative: no ball or rim", key="negative_frame", disabled=bool(boxes))
+            try:
+                if save_box:
                     record = {"game_id": game["id"], "possession_id": possession_id, "time": seconds,
                               "label": label, "box": coordinates, "split": possession["split"]}
                     if old_box:
                         record["id"] = old_box["id"]
-                    save_human(store, "box", record)
+                    record = validate_annotation(store, "box", {**record, "reviewed": True})
+                    changes = [("box", record, snapshot["box_revision"])]
                     if reviewed_frame:
-                        store.save("frame", {**reviewed_frame, "reviewed": False, "negative": False})
+                        changes.append(("frame", {**reviewed_frame, "reviewed": False, "negative": False},
+                                        snapshot["frame_revision"]))
+                    write_frame(changes)
                     flash("Box saved. Mark the complete frame reviewed when all boxes are correct.")
-                except ValueError as exc:
-                    st.error(str(exc))
-            with st.container(horizontal=True):
-                if reviewed_frame and st.button("Remove frame review label", key="remove_frame_review"):
-                    store.delete("frame", frame_id)
+                if remove_review:
+                    write_frame(deletes=[("frame", frame_id, snapshot["frame_revision"])])
                     flash("Frame review removed. Add or correct boxes, then review the frame again.")
-                if old_box and st.button("Delete selected box", key="delete_box"):
-                    store.delete("box", old_box["id"])
+                if delete_selected:
+                    changes = []
                     if reviewed_frame:
-                        store.save("frame", {**reviewed_frame, "reviewed": False})
+                        changes.append(("frame", {**reviewed_frame, "reviewed": False}, snapshot["frame_revision"]))
+                    write_frame(changes, deletes=[("box", old_box["id"], snapshot["box_revision"])])
                     flash("Box deleted. Review the frame again before exporting training data.")
-                if st.button("Mark complete frame reviewed", key="review_frame", disabled=not boxes):
-                    save_human(store, "frame", {"id": frame_id, "game_id": game["id"],
-                                               "possession_id": possession_id, "time": seconds,
-                                               "negative": False, "split": possession["split"]})
-                    flash("Frame reviewed with its saved boxes.")
-                if st.button("Reviewed negative: no ball or rim", key="negative_frame", disabled=bool(boxes)):
-                    save_human(store, "frame", {"id": frame_id, "game_id": game["id"],
-                                               "possession_id": possession_id, "time": seconds,
-                                               "negative": True, "split": possession["split"]})
-                    flash("Negative frame reviewed. It will help measure false detections.")
+                if complete or negative:
+                    record = validate_annotation(store, "frame", {"id": frame_id, "game_id": game["id"],
+                        "possession_id": possession_id, "time": seconds, "negative": negative,
+                        "split": possession["split"], "reviewed": True})
+                    write_frame([("frame", record, snapshot["frame_revision"])])
+                    flash("Negative frame reviewed. It will help measure false detections." if negative else
+                          "Frame reviewed with its saved boxes.")
+            except ValueError as exc:
+                st.error(str(exc))
         else:
             clip = store.get("clip", possession_id)
             if (clip and not clip.get("stale") and clip.get("possession_revision") == possession["revision"]

@@ -76,6 +76,13 @@ labels. Batch preparation never changes possession boundaries for you.
 
 ## Human review in the viewer
 
+Use the **Review batches** workspace to load the batch manifest, navigate source
+timestamps, keep review notes and explicitly link a frame to a corrected whole
+possession before opening **Frame labels**. See [the review workspace
+guide](REVIEW_WORKSPACE.md) for local data preservation, preview limitations and
+restart behavior. Multiple possessions may occur within a sampling window; do not
+turn the window into a verified possession automatically.
+
 1. Correct whole-possession boundaries and confirm the source partition.
 2. In Game setup, check the basket view and both team uniform colors. Revisit them
    after a camera change. A solo practice clip cannot validate defender behavior.
