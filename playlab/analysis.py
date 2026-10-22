@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -329,6 +330,7 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
     deliberately excluded both from inference and its cache key. Automatic mode
     never reads human shot anchors; assisted mode may use their release times.
     """
+    analysis_started = time.perf_counter()
     possession = store.get("possession", possession_id)
     if possession is None:
         raise ValueError("Possession not found.")
@@ -355,6 +357,9 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
     detector = None
     warnings = []
     observations, frames, modes = [], [], set()
+    diagnostic_frames = []
+    inferred_frames = 0
+    cached_scan_frames = 0
     previous_view = None
     hint = setup.get("rim_box") or setup.get("rim")
     rim_template = None
@@ -405,6 +410,7 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
             raise InterruptedError("Analysis cancelled; completed chunks can be resumed.")
         chunk_id = f"{fingerprint}:{index}"
         saved = store.get("analysis_chunk", chunk_id)
+        resumed_chunk = saved is not None
         if saved is None:
             ensure_detector()
             detector.reset()
@@ -422,12 +428,15 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                     last_ball = None
                     warnings.append("A strong camera view change broke the ball path.")
                 previous_view = view
+                if at < chunk_start:
+                    # The overlap exists only to preserve camera-view continuity
+                    # across resumable chunks. Do not run or discard model output.
+                    continue
                 detections = _ball_rim(detector, frame)
                 height, width = frame.shape[:2]
                 rim = frame_rim(frame, detections)
-                if at < chunk_start:
-                    continue
-                chunk_frames.append({"time": float(at), "players": [], "rim": rim,
+                chunk_frames.append({"time": float(at), "stage": "scan", "inference_scope": "full_frame",
+                                     "players": [], "rim": rim,
                                      "raw_detections": {key: detections.get(key, []) for key in ("balls", "rims")},
                                      "width": width, "height": height, "detector_mode": detector.mode,
                                      "view_changed": bool(view_changed)})
@@ -445,6 +454,11 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
             previous_view = np.asarray(saved["last_view"], dtype=np.uint8)
         observations.extend(saved["observations"])
         frames.extend(saved["frames"])
+        diagnostic_frames.extend(saved["frames"])
+        if resumed_chunk:
+            cached_scan_frames += len(saved["frames"])
+        else:
+            inferred_frames += len(saved["frames"])
         modes.add(saved["mode"])
         warnings.extend(saved.get("warnings", []))
         if progress:
@@ -458,7 +472,7 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
         rims = [f for f in frames if f.get("rim") and abs(f["time"] - at) <= reach]
         return min(rims, key=lambda f: abs(f["time"] - at))["rim"] if rims else None
 
-    def dense_observations(window_start, window_end, report=None):
+    def dense_observations(window_start, window_end, report=None, candidate_id=None):
         # The scan misses most rim passes (~0.1-0.2 s); re-check each shot window densely,
         # ball/rim only and, when a rim is known, only in a crop around it.
         if "color_candidates_manual_rim" in modes or window_end <= window_start:
@@ -466,6 +480,7 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
         active = ensure_detector()
         if active.mode == ColorCandidateDetector.mode:
             return []
+        nonlocal inferred_frames
         rows, last_ball = [], None
         for count, (at, frame) in enumerate(iter_frames(game["source_path"], start=window_start, end=window_end,
                                                         sample_fps=DENSE_FPS, max_width=1280), 1):
@@ -473,11 +488,22 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                 raise InterruptedError("Analysis cancelled; completed chunks can be resumed.")
             known = nearby_rim(at)
             if known:
-                detections = _cropped_ball_rim(active, frame, _rim_crop(known["bbox"], frame.shape[1], frame.shape[0]))
+                crop = _rim_crop(known["bbox"], frame.shape[1], frame.shape[0])
+                detections = _cropped_ball_rim(active, frame, crop)
                 rim = frame_rim(frame, detections) or known
+                inference_scope = "rim_crop"
             else:
                 detections = _ball_rim(active, frame)
                 rim = frame_rim(frame, detections)
+                crop, inference_scope = None, "full_frame"
+            inferred_frames += 1
+            diagnostic_frames.append({"time": float(at), "stage": "dense_shot_check",
+                                      "inference_scope": inference_scope, "crop": list(crop) if crop else None,
+                                      "candidate_id": candidate_id, "players": [], "rim": rim,
+                                      "raw_detections": {key: detections.get(key, [])
+                                                         for key in ("balls", "rims")},
+                                      "width": frame.shape[1], "height": frame.shape[0],
+                                      "detector_mode": active.mode})
             row, last_ball = _ball_observation(detections, rim, at, last_ball, frame.shape[1])
             if row:
                 rows.append(row)
@@ -489,12 +515,21 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
         """People at the release frame and +-0.4 s (extra samples for team colors); untracked."""
         if "color_candidates_manual_rim" in modes:
             return []
+        nonlocal inferred_frames
         active = ensure_detector()
         sets = []
         for at, frame in iter_frames(game["source_path"], start=max(start, release - .4),
                                      end=min(end, release + .41), sample_fps=2.5, max_width=1280):
+            raw_people = _people(active, frame)
+            inferred_frames += 1
+            diagnostic_frames.append({"time": float(at), "stage": "release_players",
+                                      "inference_scope": "full_frame", "candidate_id": tag,
+                                      "raw_detections": {"balls": [], "rims": [],
+                                                         "players": raw_people},
+                                      "width": frame.shape[1], "height": frame.shape[0],
+                                      "detector_mode": active.mode})
             people = []
-            for i, person in enumerate(_people(active, frame)):
+            for i, person in enumerate(raw_people):
                 player = {**person, "track_id": f"{tag}:{at:.1f}:{i}"}
                 player["team"] = team_for_player(frame, player["bbox"], setup.get("team_colors"))
                 if player["team"] is None and not setup.get("team_colors"):
@@ -528,7 +563,8 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                          {"stage": "checking_shots", "shot": done + 1, "shots": len(candidates)})
 
         merged.update({round(p["time"], 2): p for p in
-                       dense_observations(max(start, release - .25), min(evidence_end, release + 3), report)})
+                       dense_observations(max(start, release - .25), min(evidence_end, release + 3), report,
+                                          candidate["id"])})
         selected = [merged[key] for key in sorted(merged)]
         report(1.)
         if any(f.get("view_changed") and release - .25 <= f["time"] <= evidence_end for f in frames):
@@ -592,12 +628,21 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
     stale = (current_possession is None or current_possession.get("revision") != possession.get("revision")
              or current_setup != setup or current_anchors != anchors or current_dependencies != dependencies)
     fingerprint = canonical_hash(dependencies)[:24]
+    elapsed_seconds = time.perf_counter() - analysis_started
+    for sequence, diagnostic in enumerate(diagnostic_frames):
+        diagnostic["sequence"] = sequence
     result = store.save("analysis", {"id": record_id, "game_id": game["id"],
         "possession_id": possession_id, "fingerprint": fingerprint, "status": "complete",
         "analysis_mode": mode, "dependencies": dependencies,
         "possession_revision": possession.get("revision"), "stale": stale,
         "events": events, "shots": events, "observation_count": len(observations),
         "frames_processed": len(frames), "chunks": chunks, "warnings": sorted(set(warnings)),
+        "diagnostic_frames": diagnostic_frames,
+        "performance": {"elapsed_seconds": elapsed_seconds, "scan_fps": SCAN_FPS,
+                        "scan_image_size": 960, "device": str(device),
+                        "cpu_threads": min(4, os.cpu_count() or 1) if str(device) == "cpu" else None,
+                        "inferred_frames": inferred_frames, "cached_scan_frames": cached_scan_frames,
+                        "evaluated_frames_per_second": inferred_frames / elapsed_seconds if elapsed_seconds else None},
         "foul": "manual_only", "turnover": "manual_only",
         "accuracy_claim": "Unverified predictions; inspect evidence and review results."})
     if progress:

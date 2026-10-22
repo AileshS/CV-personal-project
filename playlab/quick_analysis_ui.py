@@ -158,8 +158,7 @@ def _results(store, game, clip, clock, advanced):
     job = clip.get("job") or {}
     _job_controls(store, job)
     result = clip.get("result")
-    if advanced:
-        render_detection_inspector(store, game, clip, result, fresh=bool(clip.get("fresh")))
+    render_detection_inspector(store, game, clip, result, fresh=bool(clip.get("fresh")))
     if not result:
         st.info("No result is available yet.")
         return
@@ -171,6 +170,20 @@ def _results(store, game, clip, clock, advanced):
     columns[0].metric("Attempts", len(events))
     columns[1].metric("Made", sum(e.get("result") == "made" for e in events))
     columns[2].metric("Missed", sum(e.get("result") == "missed" for e in events))
+    performance = result.get("performance", {})
+    if performance.get("elapsed_seconds") is not None:
+        elapsed = float(performance["elapsed_seconds"])
+        rate = performance.get("evaluated_frames_per_second")
+        inferred = performance.get("inferred_frames", result.get("frames_processed", 0))
+        cached = performance.get("cached_scan_frames", 0)
+        detail = f"{inferred} model calls this run"
+        if cached:
+            detail += f" · {cached} scan frames reused"
+        if rate is not None:
+            detail += f" · {float(rate):.1f} frames/s"
+        runtime = (f"{performance['cpu_threads']} CPU threads" if performance.get("cpu_threads")
+                   else str(performance.get("device", "model runtime")))
+        st.caption(f"Model analysis: {elapsed:.1f}s · {detail} · {runtime}")
     playback = clip.get("playback_path") or result.get("playback_path")
     if playback and Path(playback).is_file():
         st.video(str(playback))
@@ -228,6 +241,8 @@ def render_quick_analysis(store, game, clock, advanced=False):
                                 value=min(20., duration), step=1., key=f"quick_duration_{game['id']}")
     end = min(start + length, offset + duration)
     st.caption(f"Analyzes {clock(start)}–{clock(end)} ({end-start:g}s).")
+    st.caption(f"Fast CPU profile evaluates about {math.ceil((end-start) * 5)} frames in the initial scan, "
+               "then checks only possible shot windows more closely.")
     default_weights = default_ball_rim_weights()
     setup = _hints(game, start, offset, default_weights)
     weights = bundle = ""

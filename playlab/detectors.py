@@ -47,11 +47,27 @@ class BasketballDetector:
         os.environ.setdefault("YOLO_CONFIG_DIR", str(model_dir.parent / "ultralytics"))
         os.environ.setdefault("MPLCONFIGDIR", str(model_dir.parent / "matplotlib"))
         os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+        # PyTorch can expose every host core to each inference call. On shared
+        # and laptop CPUs that oversubscription is dramatically slower for
+        # these small frames (and can make the UI unresponsive).
+        if str(device) == "cpu":
+            threads = max(1, min(4, os.cpu_count() or 1))
+            os.environ.setdefault("OMP_NUM_THREADS", str(threads))
+            os.environ.setdefault("MKL_NUM_THREADS", str(threads))
         try:
             from ultralytics import YOLO
         except ImportError as exc:
             raise RuntimeError("Learned detection needs the optional vision dependencies. "
                                "Install with `uv sync --extra vision`.") from exc
+        if str(device) == "cpu":
+            import torch
+            torch.set_num_threads(threads)
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                # PyTorch permits this setting only before parallel work starts.
+                # A prior detector in this process already established the pool.
+                pass
         if weights and not Path(weights).is_file():
             raise FileNotFoundError(f"Ball/rim weights were not found: {weights}")
         self.people = YOLO(str(model_dir / "yolo11n.pt"))

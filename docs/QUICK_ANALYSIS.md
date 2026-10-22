@@ -38,8 +38,8 @@ computer is off.
 2. Choose a start timestamp and duration. The default is twenty seconds, capped
    at sixty seconds and shortened at the end of the file. These are inference
    intervals, not claims about complete possessions.
-3. Select **Analyze interval**. The worker prepares bounded playback and runs
-   automatic inference. Refresh the status to see progress. Failed or cancelled
+3. Select **Analyze**. The page prepares bounded playback and runs automatic
+   inference in place when no separate worker has claimed the job. Failed or cancelled
    jobs can resume from completed inference chunks; changes to inputs require a
    new interval request.
 4. Inspect the bounded video, individual attempts and release evidence. Result
@@ -79,7 +79,13 @@ evidence preserve original elapsed time, not the scoreboard clock.
 
 ### Inspect frames and detector boxes
 
-Under an analysis interval, enable **Show frame inspector**. In **Any frame**,
+Under an analysis interval, **Frame-by-frame model boxes** opens on saved inference
+calls. Previous/Next and the slider show every ball, rim and player box the model
+returned, including multiple candidates. Each row identifies its stage: initial
+scan, dense shot check, or release-player check. Crop and full-frame calls are also
+identified, and repeated timestamps remain separate calls. The fast initial scan
+evaluates approximately five frames per second; frames between those samples are
+only included when a dense or release check actually sent them to a model. In **Any frame**,
 use the frame slider or Previous/Next frame, then select **Detect this frame**.
 This runs a fresh diagnostic on that frame only, including for older results;
 it does not save verified labels. Boxes and detector scores appear when the
@@ -87,7 +93,7 @@ model reports candidates. No detection is shown explicitly. Scores are not
 confidence intervals or calibrated probabilities. The default COCO model has
 no rim class, so it cannot provide predicted rim boxes or rim scores.
 
-New analyses retain raw **Saved model samples**, approximately ten per second,
+New analyses retain raw **Saved model samples**, approximately five per second,
 even when shot results are unknown. These are distinct from native frame steps.
 Saved samples are hidden when their result is stale. Original source timestamps
 and native image dimensions are displayed. Frame stepping is approximate for
@@ -115,3 +121,10 @@ a game-accuracy measurement.
 Fine-tuning, bulk labeling, locked evaluation and paid compute are deferred.
 Detailed review remains available for later corrections; it is not a prerequisite
 for using this product. Phone notification receipt remains unverified.
+
+On CPU, Quick analysis caps PyTorch at four compute threads and one inter-op
+thread. This avoids severe oversubscription on many-core machines while retaining
+the existing 960-pixel model input, score thresholds and raw detector outputs.
+Completed results show measured model time and throughput for frames actually
+inferred during that invocation. Resumed scan frames are counted separately as
+reused work rather than being divided by the new invocation's runtime.

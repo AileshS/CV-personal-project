@@ -21,30 +21,42 @@ def _predict_frame(game, clip, at, source_version, model_version, default_versio
 
 
 def render_detection_inspector(store, game, clip, result, *, fresh):
-    st.subheader("Frame inspector")
-    st.caption("Inspect any frame without labeling or rerunning the interval. Yellow = ball; cyan = rim; "
+    st.subheader("Frame-by-frame model boxes")
+    st.caption("See every raw box returned by every model inference call in the interval analysis. "
+               "Yellow = ball; cyan = rim; orange = player; "
                "magenta = optional basket hint. Detector scores are not confidence intervals or calibrated probabilities.")
     if "start" not in clip or "end" not in clip:
         return
     key = f"inspect_{clip['id']}"
-    if not st.checkbox("Show frame inspector", key=key+"_show"):
+    if not st.checkbox("Show frame-by-frame detections", value=True, key=key+"_show"):
         return
-    st.caption("Detect this frame runs the current local detector as a new diagnostic, not a replay of the original analysis. "
-               "It does not establish a shot outcome or save training labels.")
     rows = sampled_detections(store, clip, result) if fresh else []
     mode = st.segmented_control("Inspection source", ["Any frame", "Saved model samples"],
-                                default="Any frame", key=key+"_mode")
+                                default="Saved model samples" if rows else "Any frame", key=key+"_mode")
     row = None
     if mode == "Saved model samples":
         if not rows:
             st.info("No raw model samples are saved for this result. Use Any frame and Detect this frame. "
                     "New interval analyses save raw samples even when the shot result is unknown.")
             return
-        index = st.slider("Model sample", 0, max(1, len(rows)-1), 0, key=key+"_sample")
+        sample_key = key+"_sample"
+        st.session_state.setdefault(sample_key, 0)
+        left, right = st.columns(2)
+        if left.button("Previous evaluated frame", key=key+"_sample_prev"):
+            st.session_state[sample_key] = max(0, st.session_state[sample_key]-1)
+        if right.button("Next evaluated frame", key=key+"_sample_next"):
+            st.session_state[sample_key] = min(len(rows)-1, st.session_state[sample_key]+1)
+        index = st.slider("Evaluated frame", 0, max(1, len(rows)-1), key=sample_key)
         row = rows[min(index, len(rows)-1)]
         at = float(row["time"])
-        st.caption("Saved analysis samples are approximately 10 per second, not predictions for every native frame.")
+        stage = row.get("stage", "scan").replace("_", " ")
+        scope = row.get("inference_scope", "full_frame").replace("_", " ")
+        st.caption(f"Inference call {min(index, len(rows)-1)+1} of {len(rows)} · {stage} · {scope}. "
+                   "The initial scan evaluates about 5 frames per second; dense shot checks and release-player calls "
+                   "are included separately, so the same timestamp can appear more than once.")
     else:
+        st.caption("Detect this frame runs the current local detector as a new diagnostic, not a replay of the original "
+                   "analysis. It does not establish a shot outcome or save training labels.")
         # Frame stepping is nominal for variable-frame-rate sources; timestamp seeking is authoritative.
         fps = float(game.get("fps") or 30)
         count = max(1, math.ceil((clip["end"]-clip["start"])*fps))
@@ -84,7 +96,8 @@ def render_detection_inspector(store, game, clip, result, *, fresh):
         image, table = overlay(native, row, clip.get("setup", {}).get("rim_box"))
         st.image(image, alt="Native frame with raw ball and rim detector candidates", width="stretch")
         detector_mode = row.get("detector_mode", "unknown")
-        st.caption(f"Detector: {detector_mode}. Raw candidates include false positives and candidates rejected by shot logic.")
+        st.caption(f"Detector: {detector_mode}. Raw candidates include false positives and candidates rejected by shot logic. "
+                   f"Stage: {row.get('stage', 'unknown').replace('_', ' ')}.")
         raw = row.get("raw_detections", {})
         if not raw.get("balls"):
             st.info("Ball: no detection above the model's reporting threshold in this frame.")
