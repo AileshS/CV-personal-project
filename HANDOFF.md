@@ -1,4 +1,61 @@
-# Paused local -> cloud handoff
+# Cloud continuation handoff — October 20, 2026
+
+Continued independently from `main` at
+`5c39f6c249a648d1f1480dfa5ffc88099667a368` on
+`cloud/basketball-pilot-20261020`. Deadline remains October 23; free resources only.
+
+Read [CLOUD_REPORT.md](CLOUD_REPORT.md) for measured results, paths and hashes, and
+[docs/ANNOTATION.md](docs/ANNOTATION.md) / [docs/TRAINING.md](docs/TRAINING.md) for
+tested workflows. The final chat report and `LOCAL_HANDOFF.md` identify the exact
+commit to fetch. Preserve existing local work and leave older projects untouched.
+
+Current code checks: **103 tests passed**, Ruff and whitespace checks passed.
+Separate planning/implementation/independent review completed with one repair cycle.
+Automatic analysis now ignores unreviewed/human shot anchors; assisted analysis
+uses reviewed anchors. Freshness, dataset/prediction provenance, single-use evaluation
+and manifest-only training/benchmark inputs are enforced. Malformed notification
+configuration fails soft. Neural runtime commands must consistently retain vision.
+
+A real CPU detector checkpoint smoke on artificial data paused/resumed optimizer
+and RNG state and completed three epochs. The full CPU dataset/classifier/evaluation
+pipeline and a detector benchmark script also executed on artificial data. None
+establishes basketball accuracy, GPU recovery or Colab/Drive readiness.
+
+Remote footage obtained: a separate **112.712604-second, 960×540 solo-practice clip**
+from the public source credited in `artifacts/source-provenance.json`. It is training-
+partition development material only. The original full-game YouTube URL remains
+blocked by proxy CONNECT 403; required YouTube domain additions are saved in the
+environment draft, not proven applied/published.
+
+Prepared `artifacts/review/public-practice-v2`: **60 native frames, four boundary-
+review windows, 21 proposed ball boxes on 19 frames**, all unreviewed. These windows
+are not claimed possessions. No rim suggestions exist in the COCO class set. The
+clip has no defender evidence and cannot replace the requested multi-possession game
+batch. No real reviewed train/validation dataset exists. Do not train from or bulk
+accept these suggestions before the user checks every frame/label.
+
+Next actions:
+
+1. Apply the saved YouTube network settings and retry the original full-game import,
+   or continue on the user's already downloaded local full game after preserving
+   its existing Store. Declare game splits/guarded blocks before sampling 40–60
+   whole-possession review items and roughly 300 diverse frames.
+2. Human-review possession boundaries, basket/team setup, all ball/rim boxes and shot
+   outcomes. Correct missed objects; empty suggestions are not negative frames.
+3. Export a new immutable reviewed dataset; train/select on train/validation only.
+   Free GPU/Colab and actual Drive recovery still require testing.
+4. Confirm one Codex phone notification receipt. The user said they would enable
+   notifications but has not confirmed receipt. Optional worker ntfy URL/token are
+   absent; no notification delivery is claimed. Pending requests persist in SQLite.
+
+Cloud viewer and worker were restarted and validated, then deliberately stopped.
+**No task-owned viewer, worker or training process remains running.** Live processes
+must be started again in another task. The cloud dataset, native review images,
+videos and model artifacts are outside Git; local code fetch does not retrieve them.
+
+---
+
+# Historical local -> cloud snapshot (superseded by the current status above)
 
 Paused at the user's request on October 20, 2026. Requested delivery: October 23.
 Repository destination: https://github.com/AileshS/CV-personal-project

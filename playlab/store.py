@@ -69,6 +69,46 @@ class Store:
                              (kind, record_id)).fetchone()
         return {**json.loads(row["payload"]), "revision": row["revision"]} if row else None
 
+    def save_many(self, changes, *, checks=(), deletes=(), collections=()):
+        """Atomically save (kind, record, expected_revision) tuples with read checks."""
+        prepared = []
+        for kind, record, expected in changes:
+            record = dict(record)
+            record.setdefault("id", uuid.uuid4().hex)
+            record.pop("revision", None)
+            prepared.append((kind, record, expected, json.dumps(record, allow_nan=False)))
+        if len({(kind, row["id"]) for kind, row, _, _ in prepared}) != len(prepared):
+            raise ValueError("Duplicate record in transaction")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for kind, filters, expected in collections:
+                rows = db.execute("SELECT payload,revision FROM records WHERE kind=?", (kind,)).fetchall()
+                actual = {}
+                for entry in rows:
+                    payload = json.loads(entry["payload"])
+                    if all(payload.get(key) == value for key, value in filters.items()):
+                        actual[payload["id"]] = entry["revision"]
+                if actual != expected:
+                    raise ValueError("These records changed elsewhere. Reload before saving.")
+            for kind, identifier, expected in list(checks) + list(deletes) + [
+                    (kind, row["id"], expected) for kind, row, expected, _ in prepared]:
+                old = db.execute("SELECT revision FROM records WHERE kind=? AND id=?",
+                                 (kind, identifier)).fetchone()
+                if expected is not None and (old["revision"] if old else 0) != expected:
+                    raise ValueError("This record changed elsewhere. Reload before saving.")
+            saved = []
+            for kind, row, _, encoded in prepared:
+                old = db.execute("SELECT revision FROM records WHERE kind=? AND id=?",
+                                 (kind, row["id"])).fetchone()
+                revision = (old["revision"] if old else 0) + 1
+                db.execute("INSERT INTO records VALUES (?,?,?,?) ON CONFLICT(kind,id) DO UPDATE "
+                           "SET payload=excluded.payload, revision=excluded.revision",
+                           (kind, row["id"], encoded, revision))
+                saved.append({**row, "revision": revision})
+            for kind, identifier, _ in deletes:
+                db.execute("DELETE FROM records WHERE kind=? AND id=?", (kind, identifier))
+        return saved
+
     def list(self, kind: str, **filters) -> list[dict]:
         with self.connect() as db:
             rows = db.execute("SELECT payload,revision FROM records WHERE kind=? ORDER BY rowid",

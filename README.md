@@ -5,22 +5,38 @@ possessions, analyzes selected possessions for made/missed shots, and suggests
 the closest visible opposing player at release using approximate image distance.
 Foul and turnover labels are manual. Predictions remain review-required.
 
+The default screen is **Track a 10-second clip**: choose a video and start time,
+select **Analyze**, then play or download the video with ball/rim boxes and detector
+scores. The worker starts automatically. No labeling, possession cutting or basket
+setup is required. See [the tracking-video guide](docs/TRACKED_VIDEO.md).
+
+The earlier Quick analysis and detailed annotation workspaces remain available
+behind **Advanced tools**. They are separate from the detection-video product.
+Made/missed recognition remains unverified; rendering boxes is not an outcome claim.
+
+For the review-batch workspace and safe local integration steps, read
+[docs/REVIEW_WORKSPACE.md](docs/REVIEW_WORKSPACE.md). The preceding local results
+are in [LOCAL_REPORT.md](LOCAL_REPORT.md). Code fetches do not transfer local videos,
+SQLite data, weights or the unreviewed frame archive.
+
 ## Start locally
 
 Python 3.12 and [uv](https://docs.astral.sh/uv/) are required.
 
 ```sh
-uv sync --locked
-uv run streamlit run app.py
+uv sync --locked --extra vision
+uv run --extra vision streamlit run app.py
 ```
 
-Run the processing worker in a second terminal:
+The tracking screen starts its worker when you select Analyze. For the advanced
+workspaces, a worker can also be started manually in a second terminal:
 
 ```sh
-uv run playlab worker
+uv run --extra vision playlab worker
 ```
 
-Install actual neural detection separately:
+For CPU development without neural inference, use `uv sync --locked` and omit
+`--extra vision` consistently. To restore the pretrained runtime:
 
 ```sh
 uv sync --locked --extra vision
@@ -32,9 +48,24 @@ does not claim those are trained basketball detections or classify their shots.
 Use `uv run --extra vision` consistently after installing that extra, because a
 plain `uv run` can remove optional dependencies when syncing the environment.
 
+Choose release assistance explicitly in the viewer or CLI:
+
+```sh
+uv run --extra vision playlab analyze POSSESSION_ID --mode automatic --queue
+uv run --extra vision playlab analyze POSSESSION_ID --mode assisted --queue
+```
+
+Automatic mode ignores human shot anchors entirely. Assisted mode uses saved
+release anchors. Their cached predictions and evaluation reports stay separate.
+
 Full sources are imported by local path or YouTube URL. The viewer queues long
 operations; it does not analyze the whole game on a widget rerun. Games,
 annotations, results and job checkpoints persist in `data/playlab.sqlite`.
+
+Choose **Review batches** to navigate a versioned review manifest, inspect
+unreviewed suggestions and save human boundary corrections before opening frame
+labels. Thumbnail-only previews support browsing; labeling requires matching local
+source assets. Loading a batch never imports a game or accepts its suggestions.
 
 ## Training and testing
 
@@ -50,9 +81,9 @@ Mark complete frames as reviewed, including every visible ball/rim, or explicitl
 mark a negative frame. Exporting partial labels is rejected.
 
 ```sh
-uv run playlab export artifacts/datasets/v1
+uv run --extra vision playlab export artifacts/datasets/v1
 uv run --extra vision playlab train-detector artifacts/datasets/v1 artifacts/runs/detector-1 --device 0
-uv run playlab train-classifier artifacts/datasets/v1 artifacts/runs/classifier-1
+uv run --extra vision playlab train-classifier artifacts/datasets/v1 artifacts/runs/classifier-1
 ```
 
 Detector training is capped at two hours per candidate and three candidates per
@@ -63,6 +94,12 @@ is retained when validation does not favor the learned classifier.
 The Colab notebook under `notebooks/` prepares SHA-pinned code/dataset packages,
 saves outputs to Google Drive, and gates longer training on checkpoint recovery.
 No actual GPU training or real-game accuracy evaluation has been completed.
+
+See [annotation and batch review](docs/ANNOTATION.md) and
+[training, checkpoint recovery and evaluation](docs/TRAINING.md) for the complete
+workflow. A real CPU checkpoint-resume smoke on artificial images has completed;
+it is software evidence only. See [cloud continuation results](CLOUD_REPORT.md)
+for measured checks, artifact hashes and remaining blockers.
 
 ## Current handoff
 

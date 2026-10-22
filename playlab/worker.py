@@ -2,12 +2,184 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 from playlab.attention import request_attention
 from playlab.media import clip_video, import_game
 from playlab.store import Store
+
+
+@contextlib.contextmanager
+def _lifecycle_guard(store: Store, *, wait_seconds: float = 0):
+    """Serialize startup/recovery; OS releases the guard even if its owner crashes."""
+    with (store.root / ".worker.guard").open("a+b") as guard:
+        guard.seek(0, os.SEEK_END)
+        if guard.tell() == 0:
+            guard.write(b"0")
+            guard.flush()
+        guard.seek(0)
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(guard.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(guard.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if time.monotonic() >= deadline:
+                    raise ValueError("Worker startup or recovery is already in progress; retry shortly.") from error
+                time.sleep(.05)
+        try:
+            yield
+        finally:
+            guard.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(guard.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(guard.fileno(), fcntl.LOCK_UN)
+
+
+def _process_alive(pid: int) -> bool | None:
+    """Check without sending a signal on Windows; None means access is uncertain."""
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False if ctypes.get_last_error() == 87 else None
+        try:
+            code = wintypes.DWORD()
+            if not kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return None
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return None
+    # An exited child can remain a zombie until this viewer reaps it. Treat that
+    # positively stopped process as stopped, rather than reserving startup forever.
+    if sys.platform.startswith("linux"):
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            if state == "Z":
+                with contextlib.suppress(ChildProcessError, OSError):
+                    os.waitpid(pid, os.WNOHANG)
+                return False
+        except (OSError, IndexError):
+            pass
+    return True
+
+
+def worker_status(store: Store) -> dict:
+    """Expose stale locks so the UI never mistakes a queued job for active processing."""
+    lock = store.root / ".worker.lock"
+    try:
+        pid = int(lock.read_text().strip())
+    except FileNotFoundError:
+        try:
+            starting = _starting_worker(store)
+        except ValueError:
+            return {"state": "unknown", "pid": None}
+        if starting:
+            alive = starting["alive"]
+            return {"state": "starting" if alive else "stopped" if alive is False else "unknown",
+                    "pid": starting["pid"]}
+        return {"state": "stopped", "pid": None}
+    except (OSError, ValueError):
+        return {"state": "unknown", "pid": None}
+    alive = _process_alive(pid)
+    return {"state": "running" if alive else "stopped" if alive is False else "unknown", "pid": pid}
+
+
+def recover_worker(store: Store):
+    """Explicit recovery must never remove the lock of a potentially live worker."""
+    with _lifecycle_guard(store):
+        status = worker_status(store)
+        if status["state"] != "stopped":
+            raise ValueError("Stop the worker before recovery; its process is still running or cannot be verified.")
+        with contextlib.suppress(FileNotFoundError):
+            (store.root / ".worker.lock").unlink()
+        store.recover_interrupted()
+
+
+def _starting_worker(store: Store):
+    path = store.root / ".worker.starting"
+    try:
+        data = json.loads(path.read_text())
+        pid = int(data["pid"])
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, TypeError, KeyError):
+        raise ValueError("Worker startup reservation cannot be verified. Inspect it before restarting.") from None
+    return {"pid": pid, "alive": _process_alive(pid)}
+
+
+def ensure_tracking_worker(store: Store):
+    """Start the same runtime after an explicit Analyze action, never on reruns.
+
+    A reservation bridges subprocess launch and lock acquisition. Recovery only
+    removes locks whose recorded process is positively known to have stopped.
+    """
+    log_path = store.root / "worker-tracking.log"
+    reservation = store.root / ".worker.starting"
+    recovered = False
+    with _lifecycle_guard(store, wait_seconds=1):
+        status = worker_status(store)
+        if status["state"] == "running":
+            return {**status, "owned": False, "recovered": False, "log_path": str(log_path)}
+        if status["state"] == "unknown":
+            raise ValueError("Existing worker cannot be verified. Inspect its process before restarting.")
+        starting = _starting_worker(store)
+        if starting:
+            if starting["alive"]:
+                return {"state": "starting", "pid": starting["pid"], "owned": False,
+                        "recovered": False, "log_path": str(log_path)}
+            if starting["alive"] is None:
+                raise ValueError("Starting worker cannot be verified. Inspect its process before restarting.")
+            reservation.unlink()
+        # This path is serialized with manual worker startup and recovery.
+        lock = store.root / ".worker.lock"
+        if lock.exists():
+            lock.unlink()
+            store.recover_interrupted()
+            recovered = True
+        reservation.write_text(json.dumps({"pid": os.getpid()}))
+        options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+                   if os.name == "nt" else {"start_new_session": True})
+        try:
+            with log_path.open("ab") as log:
+                process = subprocess.Popen([sys.executable, "-m", "playlab.cli", "--data", str(store.root), "worker"],
+                    cwd=str(Path(__file__).resolve().parents[1]),
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, **options)
+            reservation.write_text(json.dumps({"pid": process.pid}))
+            if process.poll() is not None:
+                raise ValueError("Worker could not start. Check worker-tracking.log and the viewer's runtime.")
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                reservation.unlink()
+            raise
+    return {"state": "starting", "pid": process.pid, "owned": True,
+            "recovered": recovered, "log_path": str(log_path)}
 
 
 def perform(store: Store, job: dict):
@@ -49,11 +221,21 @@ def perform(store: Store, job: dict):
         result = store.save("clip", {"id": possession["id"], "possession_id": possession["id"],
                                     "path": str(path), "possession_revision": possession["revision"],
                                     "start": possession["start"], "end": possession["end"], "stale": False})
+    elif task == "review_clip":
+        from playlab.review_clips import perform_review_clip
+        result = perform_review_clip(store, payload, cancelled=cancelled, progress=progress)
+    elif task == "analyze_clip":
+        from playlab.quick_analysis import perform_analysis_clip
+        result = perform_analysis_clip(store, payload, cancelled=cancelled, progress=progress)
+    elif task == "track_clip":
+        from playlab.clip_tracking import perform_tracking_clip
+        result = perform_tracking_clip(store, payload, cancelled=cancelled, progress=progress)
     elif task == "analyze":
         from playlab.analysis import analyze_possession
         result = analyze_possession(store, payload["possession_id"], device=payload.get("device", "cpu"),
                                     weights=payload.get("weights") or None,
                                     model_bundle=payload.get("model_bundle") or None,
+                                    mode=payload.get("mode", "assisted"),
                                     progress=progress, cancelled=cancelled)
         request_attention(store, f"analysis:{payload['possession_id']}:{result.get('id')}",
                           "Shot-analysis evidence is ready. Review uncertain outcomes and defender highlights.")
@@ -85,12 +267,19 @@ def work_once(store: Store) -> bool:
 def run_worker(store: Store, once: bool = False, poll_seconds: float = 2):
     # A filesystem lock protects explicit recovery from an accidentally concurrent worker.
     lock_path = store.root / ".worker.lock"
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as error:
-        raise ValueError("A worker lock exists. Stop the previous worker, then use worker --recover.") from error
-    os.write(fd, str(os.getpid()).encode())
-    os.close(fd)
+    with _lifecycle_guard(store, wait_seconds=5):
+        starting = _starting_worker(store)
+        if starting and starting["pid"] != os.getpid():
+            if starting["alive"] is not False:
+                raise ValueError("A worker is already starting; wait for it before launching another.")
+        if starting:
+            (store.root / ".worker.starting").unlink()
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as error:
+            raise ValueError("A worker lock exists. Stop the previous worker, then use worker --recover.") from error
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
     try:
         while True:
             worked = work_once(store)

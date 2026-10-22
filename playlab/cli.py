@@ -37,6 +37,8 @@ def parser():
     analyze.add_argument("--device", default="cpu")
     analyze.add_argument("--weights")
     analyze.add_argument("--model-bundle")
+    analyze.add_argument("--mode", choices=["automatic", "assisted"], default="assisted",
+                         help="Automatic ignores all human shot anchors; assisted uses release anchors")
     analyze.add_argument("--queue", action="store_true")
     worker = sub.add_parser("worker")
     worker.add_argument("--once", action="store_true")
@@ -48,6 +50,17 @@ def parser():
     demo.add_argument("--seconds", type=float, default=9)
     exp = sub.add_parser("export")
     exp.add_argument("destination")
+    batch = sub.add_parser("prepare-label-batch", help="Sample split-safe frames and unreviewed suggestions")
+    batch.add_argument("destination")
+    batch.add_argument("--frames", type=int, default=300)
+    batch.add_argument("--possessions", type=int, default=50, help="Review items, not verified possessions")
+    batch.add_argument("--split", dest="splits", action="append", choices=["train", "val", "test"])
+    batch.add_argument("--game", dest="game_ids", action="append")
+    batch.add_argument("--model-assisted", action="store_true")
+    batch.add_argument("--weights")
+    batch.add_argument("--device", default="cpu")
+    batch.add_argument("--allow-review-windows", action="store_true")
+    batch.add_argument("--window-seconds", type=float, default=30)
     train = sub.add_parser("train-detector")
     train.add_argument("dataset")
     train.add_argument("output")
@@ -55,6 +68,7 @@ def parser():
     train.add_argument("--resume")
     train.add_argument("--max-hours", type=float, default=2)
     train.add_argument("--epochs", type=int, default=40)
+    train.add_argument("--image-size", type=int, default=960)
     cls = sub.add_parser("train-classifier")
     cls.add_argument("rows")
     cls.add_argument("output")
@@ -66,6 +80,7 @@ def parser():
     ev.add_argument("dataset")
     ev.add_argument("predictions")
     ev.add_argument("output")
+    ev.add_argument("--freeze", help="Path to freeze.json when it is outside the report directory")
     sub.add_parser("notify-test", help="Send a test only to your configured PLAYLAB_NTFY_URL")
     attention = sub.add_parser("attention")
     attention.add_argument("--resolve")
@@ -105,19 +120,15 @@ def execute(args):
         return save_possession(store, args.game_id, args.start, args.end, reviewed=True, split=args.split)
     if command == "analyze":
         payload = {"possession_id": args.possession_id, "device": args.device, "weights": args.weights,
-                   "model_bundle": args.model_bundle}
+                   "model_bundle": args.model_bundle, "mode": args.mode}
         if args.queue:
             return {"job_id": store.enqueue("analyze", payload)}
         from playlab.analysis import analyze_possession
         return analyze_possession(store, **payload)
     if command == "worker":
-        from playlab.worker import run_worker
+        from playlab.worker import recover_worker, run_worker
         if args.recover:
-            # User explicitly confirms the old worker is stopped. Never auto-recover active work.
-            lock = store.root / ".worker.lock"
-            if lock.exists():
-                lock.unlink()
-            store.recover_interrupted()
+            recover_worker(store)
         run_worker(store, once=args.once)
         return {"status": "worker exited"}
     if command == "status":
@@ -129,10 +140,18 @@ def execute(args):
     if command == "export":
         from playlab.dataset import export_dataset
         return {"dataset": str(export_dataset(store, args.destination))}
+    if command == "prepare-label-batch":
+        from playlab.labeling import prepare_label_batch
+        path = prepare_label_batch(store, args.destination, frame_count=args.frames,
+                                   possession_count=args.possessions, splits=args.splits or ("train", "val"),
+                                   game_ids=args.game_ids, model_assisted=args.model_assisted,
+                                   weights=args.weights, device=args.device,
+                                   allow_review_windows=args.allow_review_windows, window_seconds=args.window_seconds)
+        return {"batch": str(path), "reviewed": False}
     if command == "train-detector":
         from playlab.training import train_detector
         path = train_detector(args.dataset, args.output, device=args.device, resume=args.resume,
-                              max_hours=args.max_hours, epochs=args.epochs)
+                              max_hours=args.max_hours, epochs=args.epochs, image_size=args.image_size)
         return {"run": str(path)}
     if command == "train-classifier":
         from playlab.training import train_classifier
@@ -142,10 +161,10 @@ def execute(args):
         return {"freeze": str(freeze_run(args.dataset, args.artifacts, args.output))}
     if command == "evaluate":
         from playlab.evaluation import evaluate_locked
-        return evaluate_locked(args.dataset, args.predictions, args.output)
+        return evaluate_locked(args.dataset, args.predictions, args.output, freeze=args.freeze)
     if command == "notify-test":
         from playlab.attention import notify
-        return notify("Play Lab test: phone notifications are connected. No action needed.")
+        return notify("Play Lab notification test. Confirm receipt in Codex; no footage or labels included.")
     if command == "attention":
         from playlab.attention import resolve_attention
         if args.resolve:

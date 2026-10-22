@@ -86,9 +86,9 @@ def test_human_result_never_becomes_automatic_prediction(tmp_path, fake_video):
 
 def test_corrected_release_invalidates_cache(tmp_path, fake_video):
     store = fixture_store(tmp_path)
-    store.save("shot", {"id": "s", "possession_id": "p", "release": 1., "result": "unknown"})
+    store.save("shot", {"id": "s", "possession_id": "p", "release": 1., "result": "unknown", "reviewed": True})
     first = analysis.analyze_possession(store, "p")
-    store.save("shot", {"id": "s", "possession_id": "p", "release": 2., "result": "unknown"})
+    store.save("shot", {"id": "s", "possession_id": "p", "release": 2., "result": "unknown", "reviewed": True})
     second = analysis.analyze_possession(store, "p")
     assert first["fingerprint"] != second["fingerprint"]
     assert second["events"][0]["release"] == 2.
@@ -128,7 +128,7 @@ def test_later_rebound_shot_does_not_enter_first_shot_evidence(tmp_path, fake_vi
     store = fixture_store(tmp_path)
     for identifier, release in (("first", 1.), ("rebound", 2.)):
         store.save("shot", {"id": identifier, "possession_id": "p", "release": release,
-                            "result": "unknown"})
+                            "result": "unknown", "reviewed": True})
     class FixedObjects(FakeDetector):
         def __call__(self, frame):
             return {"balls": [{"bbox": [10., 10., 14., 14.], "confidence": .9}],
@@ -187,3 +187,136 @@ def test_automatic_event_matches_gold_by_source_time_without_human_id(tmp_path, 
     assert metrics["matched"] == 1
     assert metrics["emitted"] == 0
     assert metrics["false_positive_events"] == 0
+
+
+def test_automatic_mode_ignores_human_anchors_and_preserves_assisted_run(tmp_path, fake_video, monkeypatch):
+    store = fixture_store(tmp_path)
+    store.save("shot", {"id": "s", "game_id": "g", "possession_id": "p", "release": 1.,
+                        "result": "made", "reviewed": True})
+    monkeypatch.setattr(analysis, "shot_proposals", lambda observations: [2.])
+    assisted = analysis.analyze_possession(store, "p")
+    automatic = analysis.analyze_possession(store, "p", mode="automatic")
+    assert assisted["events"][0]["origin"] == "human_release_anchor"
+    assert len(automatic["events"]) == 1
+    assert automatic["events"][0]["release"] == 2.
+    assert automatic["events"][0]["origin"] == "automatic_rim_approach"
+    assert automatic["analysis_mode"] == "automatic"
+    assert store.get("analysis", "p")["fingerprint"] == assisted["fingerprint"]
+    before = FakeDetector.calls
+    store.save("shot", {"id": "s", "game_id": "g", "possession_id": "p", "release": 3.,
+                        "result": "missed", "reviewed": True})
+    assert analysis.analysis_is_fresh(store, automatic)
+    assert not analysis.analysis_is_fresh(store, assisted)
+    again = analysis.analyze_possession(store, "p", mode="automatic")
+    assert again["fingerprint"] == automatic["fingerprint"] and FakeDetector.calls == before
+
+
+def test_freshness_checks_source_setup_and_model_contents(tmp_path, fake_video):
+    import os
+    store = fixture_store(tmp_path)
+    weights = tmp_path / "fixture-weights.pt"
+    weights.write_bytes(b"AAAA")
+    result = analysis.analyze_possession(store, "p", weights=weights, mode="automatic")
+    assert analysis.analysis_is_fresh(store, result)
+    stamp = weights.stat()
+    weights.write_bytes(b"BBBB")
+    os.utime(weights, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    assert not analysis.analysis_is_fresh(store, result)
+    weights.write_bytes(b"AAAA")
+    os.utime(weights, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    assert analysis.analysis_is_fresh(store, result)
+    store.save("setup", {"id": "g", "rim_box": [.1, .2, .3, .4]})
+    assert not analysis.analysis_is_fresh(store, result)
+    store.delete("setup", "g")
+    assert analysis.analysis_is_fresh(store, result)
+    (tmp_path / "input.mp4").write_bytes(b"changed video")
+    assert not analysis.analysis_is_fresh(store, result)
+
+
+def test_assisted_mode_ignores_draft_shots_until_human_review(tmp_path, fake_video, monkeypatch):
+    store = fixture_store(tmp_path)
+    draft = store.save("shot", {"id": "draft", "game_id": "g", "possession_id": "p", "release": 1.,
+                                "result": "made", "reviewed": False, "source": "prediction"})
+    monkeypatch.setattr(analysis, "shot_proposals", lambda observations: [2.])
+    first = analysis.analyze_possession(store, "p", mode="assisted")
+    assert first["dependencies"]["anchors"] == []
+    assert len(first["events"]) == 1
+    assert first["events"][0]["origin"] == "automatic_rim_approach"
+    assert first["events"][0]["release"] == 2.
+    assert first["events"][0]["release_confirmed"] is False
+    before = FakeDetector.calls
+    draft = store.save("shot", {**draft, "release": 3.})
+    assert analysis.analysis_is_fresh(store, first)
+    again = analysis.analyze_possession(store, "p", mode="assisted")
+    assert again["fingerprint"] == first["fingerprint"] and FakeDetector.calls == before
+    store.save("shot", {**draft, "reviewed": True, "source": "human"})
+    reviewed = analysis.analyze_possession(store, "p", mode="assisted")
+    assert reviewed["fingerprint"] != first["fingerprint"]
+    assert reviewed["events"][0]["origin"] == "human_release_anchor"
+    assert reviewed["events"][0]["release_confirmed"] is True
+
+
+@pytest.mark.parametrize("changed", ["weights", "model_bundle"])
+def test_custom_artifact_changed_during_detector_startup_marks_result_stale(tmp_path, fake_video, monkeypatch, changed):
+    store = fixture_store(tmp_path)
+    artifact = tmp_path / "custom.pt"
+    artifact.write_bytes(b"before startup")
+    class ChangingDetector(FakeDetector):
+        def __init__(self, *args):
+            artifact.write_bytes(b"changed while starting")
+    monkeypatch.setattr(analysis, "BasketballDetector", ChangingDetector)
+    result = analysis.analyze_possession(store, "p", **{changed: artifact})
+    assert result["stale"] is True
+    assert not analysis.analysis_is_fresh(store, result)
+
+
+def test_initial_default_model_download_is_captured_without_marking_result_stale(tmp_path, fake_video, monkeypatch):
+    store = fixture_store(tmp_path)
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    default = model_dir / "yolo11n.pt"
+    class DownloadingDetector(FakeDetector):
+        def __init__(self, *args):
+            default.write_bytes(b"explicit mock default model download")
+    monkeypatch.setenv("PLAYLAB_MODEL_DIR", str(model_dir))
+    monkeypatch.setattr(analysis, "_vision_version", lambda: "test-runtime")
+    monkeypatch.setattr(analysis, "BasketballDetector", DownloadingDetector)
+    result = analysis.analyze_possession(store, "p")
+    assert result["stale"] is False
+    assert analysis.analysis_is_fresh(store, result)
+
+
+def test_missing_optional_weights_allow_honest_fallback_export_and_freeze(tmp_path, fake_video, monkeypatch):
+    import json
+
+    from playlab.benchmark import predict_dataset
+    from playlab.dataset import export_dataset
+    from playlab.evaluation import evaluate_locked, freeze_run
+
+    store = fixture_store(tmp_path)
+    missing = tmp_path / "offline-models" / "yolo11n.pt"
+    monkeypatch.setattr(analysis, "_default_model_path", lambda: missing)
+    monkeypatch.setattr(analysis, "_vision_version", lambda: "installed-test-runtime")
+
+    def offline_detector(*args):
+        raise RuntimeError("Optional pretrained weights are unavailable offline")
+
+    monkeypatch.setattr(analysis, "BasketballDetector", offline_detector)
+    monkeypatch.setattr(analysis, "shot_proposals", lambda observations: [1.0])
+    result = analysis.analyze_possession(store, "p", mode="automatic")
+    assert result["dependencies"]["artifacts"] == {}
+    assert result["dependencies"]["unavailable_artifacts"] == [str(missing)]
+    assert analysis.analysis_is_fresh(store, result)
+    assert result["events"][0]["predicted_result"] == "unknown"
+    store.save("shot", {"id": "gold", "game_id": "g", "possession_id": "p", "release": 1.,
+                        "result": "made", "reviewed": True, "split": "test",
+                        "context_start": 0., "context_end": 5.})
+    dataset = export_dataset(store, tmp_path / "dataset")
+    predictions = predict_dataset(store, dataset, tmp_path / "predictions.json")
+    assert json.loads(predictions.read_text())["inference_artifacts"] == {}
+    freeze = freeze_run(dataset, [predictions], tmp_path / "freeze")
+    report = evaluate_locked(dataset, predictions, tmp_path / "report", freeze)
+    assert report["eligible"] == 1 and report["emitted"] == 0
+    missing.parent.mkdir()
+    missing.write_bytes(b"newly available weights")
+    assert not analysis.analysis_is_fresh(store, result)

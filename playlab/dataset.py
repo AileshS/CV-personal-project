@@ -103,6 +103,7 @@ def export_dataset(store, destination: str | Path) -> Path:
     """
     from PIL import Image
 
+    from playlab.analysis import analysis_is_fresh, analysis_record_id
     from playlab.media import frame_at
 
     destination = Path(destination).resolve()
@@ -117,9 +118,17 @@ def export_dataset(store, destination: str | Path) -> Path:
     # Visual features come only from saved predictions matched by time; never
     # derive them from the human outcome label or turn the prediction into gold.
     for record in records:
-        if record["kind"] == "shot" and not record.get("features"):
-            analysis = store.get("analysis", record["possession_id"])
-            if analysis and analysis.get("stale"):
+        if record["kind"] == "shot":
+            # Embedded features are derived data, not human gold. Reattach only
+            # from a currently valid inference result, even if features already
+            # exist on an old annotation from a previous export/import.
+            record.pop("features", None)
+            record.pop("features_source", None)
+            analysis = next((candidate for mode in ("assisted", "automatic")
+                             if analysis_is_fresh(store, candidate := store.get(
+                                 "analysis", analysis_record_id(record["possession_id"], mode)))), None)
+            if analysis is None:
+                record["features_status"] = "missing_or_stale_analysis"
                 continue
             candidates = [event for event in (analysis or {}).get("events", [])
                           if event.get("type") == "shot" and event.get("features")
@@ -128,7 +137,9 @@ def export_dataset(store, destination: str | Path) -> Path:
                 nearest = min(candidates, key=lambda e: abs(float(e["release"]) - float(record["release"])))
                 record["features"] = nearest["features"]
                 record["features_source"] = {"analysis_id": record["possession_id"], "event_id": nearest["id"],
-                                             "analysis_fingerprint": analysis.get("fingerprint")}
+                                             "analysis_fingerprint": analysis.get("fingerprint"),
+                                             "analysis_mode": analysis["analysis_mode"]}
+                record["features_status"] = "current_prediction"
     game_map = {str(g["id"]): g for g in games}
     frames = {}
     for r in records:
@@ -224,4 +235,11 @@ def verify_dataset(dataset: str | Path) -> dict:
         path = (dataset / relative).resolve()
         if not path.is_relative_to(dataset) or not path.is_file() or file_hash(path) != expected:
             raise ValueError(f"Dataset file changed or missing: {relative}")
+    # Training libraries discover images by directory, so checking only listed
+    # hashes is insufficient: an injected/unlisted image would enter the run.
+    for directory in ("images", "labels"):
+        for path in (dataset / directory).rglob("*"):
+            if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".txt"}:
+                if path.relative_to(dataset).as_posix() not in manifest["files"]:
+                    raise ValueError("Unmanifested image or label in dataset; export a new version.")
     return manifest

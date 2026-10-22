@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import os
 import urllib.error
 import urllib.parse
@@ -14,22 +15,24 @@ def notify(message: str, *, title: str = "Play Lab needs attention") -> dict:
     url = os.environ.get("PLAYLAB_NTFY_URL", "")
     if not url:
         return {"delivered": False, "reason": "Phone notifications are not configured"}
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname or not parsed.path.strip("/"):
-        return {"delivered": False, "reason": "Notification topic is invalid; use an HTTPS topic URL"}
-    headers = {"Title": title, "Priority": "default", "Content-Type": "text/plain; charset=utf-8"}
-    token = os.environ.get("PLAYLAB_NTFY_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, data=message.encode(), headers=headers, method="POST")
     try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https" or not parsed.hostname or not parsed.path.strip("/"):
+            return {"delivered": False, "reason": "Notification topic is invalid; use an HTTPS topic URL"}
+        # Accessing port validates malformed/out-of-range ports before HTTP I/O.
+        _ = parsed.port
+        headers = {"Title": title, "Priority": "default", "Content-Type": "text/plain; charset=utf-8"}
+        token = os.environ.get("PLAYLAB_NTFY_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(url, data=message.encode(), headers=headers, method="POST")
         # Never follow redirects with the Authorization token.
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 return None
         with urllib.request.build_opener(NoRedirect).open(request, timeout=15) as response:
             return {"delivered": 200 <= response.status < 300, "accepted_at": utcnow()}
-    except (urllib.error.URLError, TimeoutError, ValueError, UnicodeError):
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ValueError, UnicodeError):
         return {"delivered": False, "reason": "Notification delivery failed; check the worker's network access"}
 
 
