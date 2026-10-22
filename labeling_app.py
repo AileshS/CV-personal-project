@@ -1,4 +1,4 @@
-"""Labeling and review workspaces (possessions, frame labels, review batches, jobs).
+"""Labeling and review workspaces (tracking video, possessions, frame labels, review batches, jobs).
 
 Only one requested frame is decoded here. Full-game importing, clipping,
 indexing and model inference are queued; widget reruns never load models.
@@ -30,6 +30,7 @@ from playlab.quick_analysis_ui import render_quick_analysis
 from playlab.review import frame_selection, load_batch
 from playlab.review_ui import render_review_batches
 from playlab.store import Store
+from playlab.tracking_video_ui import render_tracking_video
 
 SPLITS = ["unassigned", "train", "val", "test"]
 SPLIT_NAMES = {"unassigned": "Unassigned", "train": "Training", "val": "Validation", "test": "Final test"}
@@ -112,8 +113,9 @@ with st.sidebar:
                          help="Labeling, review batches, game setup, jobs and model files.")
     view = "Quick analysis"
     if advanced:
-        view = st.selectbox("Workspace", ["Quick analysis", "Possessions", "Review batches", "Frame labels",
-                                          "Game setup", "Import game", "Jobs and export"], key="workspace")
+        view = st.selectbox("Workspace", ["Quick analysis", "Tracking video", "Possessions", "Review batches",
+                                          "Frame labels", "Game setup", "Import game", "Jobs and export"],
+                            key="workspace")
         st.caption("Long jobs (imports, whole possessions) need the worker: "
                    "`uv run --extra vision playlab worker`.")
         if os.environ.get("PLAYLAB_NTFY_URL"):
@@ -127,6 +129,9 @@ possessions = sorted(store.list("possession", game_id=selected_game), key=lambda
 
 if view == "Quick analysis":
     render_quick_analysis(store, game, clock, advanced)
+
+elif view == "Tracking video":
+    render_tracking_video(store, clock)
 
 elif view == "Import game":
     st.subheader("Import a game")

@@ -113,6 +113,7 @@ def test_explicit_confirmation_exact_prefill_and_human_save(batch_desk):
     assert store.list("frame")[0]['reviewed']
     assert store.get("possession", target_id)['end'] - store.get("possession", target_id)['start'] == 2
     restarted = AppTest.from_file(str(APP), default_timeout=15).run()
+    restarted.toggle(key="advanced").set_value(True).run()
     assert not restarted.exception
     assert Store(store.root).list("frame")[0]['reviewed']
     assert not store.jobs()

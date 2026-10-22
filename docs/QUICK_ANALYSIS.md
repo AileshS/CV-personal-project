@@ -1,5 +1,10 @@
 # Quick analysis
 
+Quick analysis is the whole site (`streamlit run app.py`). The ten-second ball/rim
+video flow in [TRACKED_VIDEO.md](TRACKED_VIDEO.md) and the labeling tools are in
+`labeling_app.py`. With `artifacts/models/ball_rim.pt` present, Quick analysis uses
+that ball/rim model; the COCO limitations below apply only without it.
+
 Start with a short video interval, run inference, and inspect each proposed shot
 and its evidence. Possession cutting, frame selection, box labeling and dataset
 partitioning are not prerequisites. Analysis intervals are not verified whole
