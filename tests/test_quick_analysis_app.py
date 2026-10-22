@@ -185,14 +185,14 @@ def test_frame_inspector_old_result_supports_single_frame_without_reanalysis(qui
     at.toggle(key="advanced").set_value(True).run()
     at.checkbox(key=key+"_show").check().run()
     assert not at.exception
-    assert any("no saved predictions" in m.value for m in at.info)
+    assert calls == [0.]
     at.button(key=key+"_detect").click().run()
-    assert not at.exception and calls == [0.]
+    assert not at.exception and calls[-1] == 0.
     assert any("unsupported" in m.value for m in at.info)
     at.button(key=key+"_next").click().run()
-    assert not at.exception and calls == [0.]
+    assert not at.exception and calls[-1] == pytest.approx(1 / 30)
     assert at.slider(key=key+"_frame").value == 1
-    assert any("no saved predictions" in m.value for m in at.info)
+    assert any("unsupported" in m.value for m in at.info)
     assert len(store.jobs()) == 1
     assert store.list("box") == [] and store.list("frame") == []
 

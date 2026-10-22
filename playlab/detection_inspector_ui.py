@@ -125,7 +125,9 @@ def render_detection_inspector(store, game, clip, result, *, fresh):
                    f"Stage: {row.get('stage', 'unknown').replace('_', ' ')}.")
         raw = row.get("raw_detections", {})
         if not raw.get("balls"):
-            st.info("Ball: no candidate returned, even at the diagnostic floor of 0.0001%. No location is invented.")
+            st.info("Ball: no candidate returned, even at the diagnostic floor of 0.0001%. No location is invented."
+                    if row.get("diagnostic") else
+                    "Ball: no candidate returned at this analysis call's reporting threshold. No location is invented.")
         if not raw.get("rims"):
             if detector_mode == "pretrained_coco_ball":
                 st.info("Rim: unsupported by the current COCO model (no rim class). This is not a low-confidence rim prediction.")
