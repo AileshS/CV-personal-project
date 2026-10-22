@@ -12,14 +12,17 @@ from playlab.quick_analysis import _allow_interval
 
 
 def sampled_detections(store, clip, result):
-    """Return raw saved candidates, including balls rejected by trajectory logic."""
+    """Return every persisted inference call, including boxes rejected by shot logic."""
     if not result:
         return []
+    if "diagnostic_frames" in result:
+        return sorted(result["diagnostic_frames"], key=lambda row: (row["time"], row.get("sequence", 0)))
     rows = []
     for index in range(result.get("chunks", 0)):
         key = f"{clip['id']}:{result['fingerprint']}:{index}"
         chunk = store.get("quick_analysis_chunk", key) or {}
-        rows.extend(row for row in chunk.get("frames", []) if "raw_detections" in row)
+        rows.extend({"stage": "scan", "inference_scope": "full_frame", **row}
+                    for row in chunk.get("frames", []) if "raw_detections" in row)
     return sorted(rows, key=lambda row: row["time"])
 
 
@@ -44,7 +47,8 @@ def inspect_frame(game, clip, at, detector=None):
     detector.reset()
     detections = detector.diagnostic(frame) if hasattr(detector, "diagnostic") else detector(frame)
     height, width = frame.shape[:2]
-    return {"time": at, "raw_detections": {k: detections.get(k, []) for k in ("balls", "rims")},
+    return {"time": at, "stage": "on_demand", "inference_scope": "full_frame",
+            "raw_detections": {k: detections.get(k, []) for k in ("balls", "rims", "players")},
             "width": width, "height": height, "detector_mode": detector.mode,
             "diagnostic": True, "reporting_floor": 0.000001}
 
@@ -55,7 +59,8 @@ def overlay(frame, row, hint=None):
     draw = ImageDraw.Draw(image)
     sx, sy = image.width / row["width"], image.height / row["height"]
     table = []
-    for key, name, color in (("balls", "Ball", "#ffff00"), ("rims", "Rim", "#00ffff")):
+    for key, name, color in (("balls", "Ball", "#ffff00"), ("rims", "Rim", "#00ffff"),
+                             ("players", "Player", "#ff8c42")):
         for item in row.get("raw_detections", {}).get(key, []):
             box = [float(v) * (sx if i % 2 == 0 else sy) for i, v in enumerate(item["bbox"])]
             score = float(item["confidence"])
