@@ -42,10 +42,11 @@ def inspect_frame(game, clip, at, detector=None):
             raise ValueError("Default detector weights are missing. Restore the existing local weights first.")
         detector = BasketballDetector(clip.get("weights"), clip.get("device", "cpu"))
     detector.reset()
-    detections = detector(frame)
+    detections = detector.diagnostic(frame) if hasattr(detector, "diagnostic") else detector(frame)
     height, width = frame.shape[:2]
     return {"time": at, "raw_detections": {k: detections.get(k, []) for k in ("balls", "rims")},
-            "width": width, "height": height, "detector_mode": detector.mode}
+            "width": width, "height": height, "detector_mode": detector.mode,
+            "diagnostic": True, "reporting_floor": 0.000001}
 
 
 def overlay(frame, row, hint=None):
@@ -59,10 +60,17 @@ def overlay(frame, row, hint=None):
             box = [float(v) * (sx if i % 2 == 0 else sy) for i, v in enumerate(item["bbox"])]
             score = float(item["confidence"])
             draw.rectangle(box, outline=color, width=3)
-            draw.text((max(0, box[0]), max(0, box[1]-13)), f"{name} {score:.1%}", fill=color,
+            draw.text((max(0, box[0]), max(0, box[1]-13)), f"{name} guess {score:.4%}", fill=color,
                       stroke_width=1, stroke_fill="black")
             table.append({"Object": name, "Detector score": score,
                           "Native box (left, top, right, bottom)": [round(v, 1) for v in box]})
+    status = f"Ball: {'best model guess' if row.get('raw_detections', {}).get('balls') else 'no candidate'}"
+    if row.get("detector_mode") == "pretrained_coco_ball":
+        status += " | Rim: unsupported by model"
+    elif not row.get("raw_detections", {}).get("rims"):
+        status += " | Rim: no candidate"
+    draw.rectangle((0, 0, min(image.width, 650), 25), fill="black")
+    draw.text((5, 5), status, fill="white")
     if hint:
         box = [v * (image.width if i % 2 == 0 else image.height) for i, v in enumerate(hint)]
         draw.rectangle(box, outline="#ff55ff", width=3)
