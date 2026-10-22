@@ -5,6 +5,7 @@ Frame sampling is intentionally approximate to the requested sampling period.
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import io
 import json
@@ -28,8 +29,11 @@ def ffmpeg_executable() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
-def _capture(args, timeout=180, cancelled=None):
-    """Bound output on disk while polling cancellation, including child encoders."""
+def _capture(args, timeout=180, cancelled=None, poll=None):
+    """Bound output on disk while polling cancellation, including child encoders.
+
+    `poll()` is called about every 0.2 s while the process runs (e.g. to report progress).
+    """
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as errors:
         flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {
             "start_new_session": True}
@@ -41,6 +45,8 @@ def _capture(args, timeout=180, cancelled=None):
                     raise InterruptedError("Processing cancelled; partial files are retained for retry")
                 if time.monotonic()-started > timeout:
                     raise ValueError("Processing exceeded its time limit")
+                if poll:
+                    poll()
                 time.sleep(.2)
             out.seek(0)
             errors.seek(0, 2)
@@ -188,16 +194,39 @@ def clip_video(source: str | Path, destination: str | Path, start: float, end: f
     return destination
 
 
-def download_source(url: str, directory: str | Path, *, metadata_only: bool = False,
-                    cancelled=None) -> Path | dict:
+YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+
+
+def is_youtube_url(value: str) -> bool:
     from urllib.parse import urlparse
-    host = (urlparse(url).hostname or "").lower()
-    if host not in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
+    value = str(value).strip()
+    return value.startswith(("https://", "http://")) and (urlparse(value).hostname or "").lower() in YOUTUBE_HOSTS
+
+
+def _js_runtime_args() -> list[str]:
+    """YouTube streams need a JS challenge solver (yt-dlp-ejs) run by Deno or Node.
+
+    yt-dlp only enables Deno by default, so point it at Node when that is what exists.
+    """
+    if shutil.which("deno"):
+        return []
+    node = shutil.which("node")
+    return ["--js-runtimes", f"node:{node}"] if node else []
+
+
+def download_source(url: str, directory: str | Path, *, metadata_only: bool = False,
+                    cancelled=None, progress=None) -> Path | dict:
+    """Download a YouTube video (<= 1080p, MP4) into `directory`.
+
+    progress(done_bytes, total_bytes) is estimated from the partial files on disk
+    against yt-dlp's approximate size; total may be None when YouTube omits it.
+    """
+    if not is_youtube_url(url):
         raise ValueError("URL import currently supports YouTube only; use a local path for other videos")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     args = [sys.executable, "-m", "yt_dlp", "--no-playlist", "--socket-timeout", "25",
-            "--retries", "1", "--no-warnings"]
+            "--retries", "1", "--no-warnings", *_js_runtime_args()]
     if metadata_only:
         args += ["--skip-download", "--dump-single-json", url]
         code, output, error = _capture(args, timeout=120, cancelled=cancelled)
@@ -205,11 +234,32 @@ def download_source(url: str, directory: str | Path, *, metadata_only: bool = Fa
             raise ValueError(error.decode(errors="replace")[-2500:])
         info = json.loads(output)
         return {k: info.get(k) for k in ("id", "title", "duration", "webpage_url", "channel", "upload_date")}
-    args += ["--no-progress", "-f", "bv*[height<=1080]+ba/b[height<=1080]/best",
+    formats = "bv*[height<=1080]+ba/b[height<=1080]/best"
+    poll = None
+    if progress:
+        probe = [*args, "--skip-download", "-f", formats, "--print", "%(id)s %(filesize_approx)s", url]
+        code, output, error = _capture(probe, timeout=120, cancelled=cancelled)
+        if code:
+            raise ValueError("YouTube retrieval failed. A local MP4 can be imported instead.\n" +
+                             error.decode(errors="replace")[-2500:])
+        video_id, _, size = output.decode(errors="replace").strip().splitlines()[-1].partition(" ")
+        total = int(size) if size.isdigit() else None
+        last = [0.0]
+
+        def poll():
+            if time.monotonic() - last[0] < 1:
+                return
+            last[0] = time.monotonic()
+            done = sum(p.stat().st_size for p in directory.glob(f"{glob.escape(video_id)}*")
+                       if p.is_file() and not p.name.endswith(".json"))
+            progress(done, total)
+
+        progress(0, total)
+    args += ["--no-progress", "-f", formats,
              "--merge-output-format", "mp4", "--ffmpeg-location", ffmpeg_executable(),
              "--write-info-json", "-o", str(directory / "%(id)s.%(ext)s"),
              "--print", "after_move:filepath", url]
-    code, output, error = _capture(args, timeout=3600, cancelled=cancelled)
+    code, output, error = _capture(args, timeout=3600, cancelled=cancelled, poll=poll)
     if code:
         raise ValueError("YouTube retrieval failed. A local MP4 can be imported instead.\n" +
                          error.decode(errors="replace")[-2500:])
@@ -221,11 +271,17 @@ def download_source(url: str, directory: str | Path, *, metadata_only: bool = Fa
 
 
 def import_game(store, source: str | Path, name: str | None = None, source_url: str | None = None,
-                cancelled=None) -> dict:
+                cancelled=None, progress=None) -> dict:
     value = str(source)
     if value.startswith(("https://", "http://")):
         source_url = value
-        source = download_source(value, store.root / "sources", cancelled=cancelled)
+        source = download_source(value, store.root / "sources", cancelled=cancelled, progress=progress)
+        if not name:
+            # yt-dlp writes <id>.info.json beside the video; use its title as the display name.
+            try:
+                name = json.loads(Path(source).with_suffix(".info.json").read_text(encoding="utf-8")).get("title")
+            except (OSError, ValueError):
+                name = None
     source = Path(source).resolve()
     meta = probe_video(source)
     fingerprint = source_fingerprint(source)

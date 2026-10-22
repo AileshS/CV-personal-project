@@ -30,11 +30,22 @@ def test_ball_candidates_survive_missing_rim_in_saved_chunks(tmp_path, monkeypat
 
 def test_overlay_native_scaling_and_hint_has_no_detector_score():
     row = {"width": 100, "height": 50, "raw_detections": {
-        "balls": [{"bbox": [10, 5, 20, 10], "confidence": .73}], "rims": []}}
+        "balls": [{"bbox": [10, 5, 20, 10], "confidence": .73},
+                  {"bbox": [30, 15, 35, 20], "confidence": .21}],
+        "rims": [{"bbox": [60, 5, 80, 12], "confidence": .88}],
+        "players": [{"bbox": [2, 10, 9, 40], "confidence": .67}]}}
     image, table = overlay(np.zeros((100, 200, 3), dtype=np.uint8), row, [.7, .2, .8, .3])
     assert image.size == (200, 100)
-    assert table == [{"Object": "Ball", "Detector score": .73,
-                      "Native box (left, top, right, bottom)": [20., 10., 40., 20.]}]
+    assert table == [
+        {"Object": "Ball", "Detector score": .73,
+         "Native box (left, top, right, bottom)": [20., 10., 40., 20.]},
+        {"Object": "Ball", "Detector score": .21,
+         "Native box (left, top, right, bottom)": [60., 30., 70., 40.]},
+        {"Object": "Rim", "Detector score": .88,
+         "Native box (left, top, right, bottom)": [120., 10., 160., 24.]},
+        {"Object": "Player", "Detector score": .67,
+         "Native box (left, top, right, bottom)": [4., 20., 18., 80.]},
+    ]
 
 
 def test_single_frame_inference_bounds_and_gold_isolation(monkeypatch):
@@ -65,3 +76,15 @@ def test_saved_samples_have_explicit_timestamps(tmp_path):
     store.save("quick_analysis_chunk", {"id": "c:f:0", "frames": [
         {"time": 1.2, "raw_detections": {"balls": [], "rims": []}}, {"time": 1.3}]})
     assert [r["time"] for r in sampled_detections(store, {"id": "c"}, {"chunks": 1, "fingerprint": "f"})] == [1.2]
+
+
+def test_final_diagnostics_include_every_stage_and_preserve_duplicate_times(tmp_path):
+    store = Store(tmp_path)
+    diagnostics = [
+        {"time": 1.2, "sequence": 0, "stage": "scan", "raw_detections": {"balls": []}},
+        {"time": 1.2, "sequence": 1, "stage": "dense_shot_check", "raw_detections": {"balls": []}},
+        {"time": 1.2, "sequence": 2, "stage": "release_players", "raw_detections": {"players": []}},
+    ]
+    result = {"chunks": 0, "fingerprint": "f", "diagnostic_frames": diagnostics}
+    rows = sampled_detections(store, {"id": "c"}, result)
+    assert [row["stage"] for row in rows] == ["scan", "dense_shot_check", "release_players"]

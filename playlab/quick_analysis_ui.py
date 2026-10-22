@@ -13,7 +13,7 @@ import streamlit as st
 from playlab.analysis import default_ball_rim_weights
 from playlab.box_drawer import draw_frame
 from playlab.detection_inspector_ui import render_detection_inspector
-from playlab.media import frame_at
+from playlab.media import frame_at, is_youtube_url
 from playlab.quick_analysis import get_analysis_clip, queue_analysis_clip
 from playlab.quick_import import import_quick_source
 from playlab.worker import run_job_now, worker_status
@@ -40,8 +40,38 @@ def _import(store, source, **metadata):
     st.rerun()
 
 
+def _import_youtube(store, url):
+    url = url.strip()
+    if not is_youtube_url(url):
+        st.error("Paste a YouTube link, for example https://www.youtube.com/watch?v=…")
+        return
+    known = next((g for g in store.list("game") if g.get("source_url") == url), None)
+    if known is None:
+        job_id = store.enqueue("import", {"source": url, "name": None})
+        if not _run_here(store, job_id, "Starting the download… keep this page open."):
+            st.info("A background worker took this download. The video appears under Video when it finishes.")
+            return
+        job = next((j for j in store.jobs() if j["id"] == job_id), {})
+        if job.get("status") != "done":
+            st.error(f"Download did not finish: {job.get('error') or job.get('status')}. "
+                     "Try again; finished parts are reused.")
+            return
+        known = next((g for g in reversed(store.list("game")) if g.get("source_url") == url), None)
+    if known:
+        st.session_state["quick_imported_game"] = known["id"]
+        st.rerun()
+
+
 def _open_video(store, game, advanced):
-    with st.expander("Open a video", expanded=game is None):
+    with st.expander("Add a video", expanded=game is None):
+        with st.form("quick_youtube"):
+            url = st.text_input("YouTube link", key="quick_youtube_url",
+                                placeholder="https://www.youtube.com/watch?v=…",
+                                help="Downloads up to 1080p into data/sources. A full game can take several minutes.")
+            fetch = st.form_submit_button("Download from YouTube", key="quick_youtube_fetch", type="primary")
+        if fetch:
+            _import_youtube(store, url)
+        st.caption("Or open a video file already on this computer:")
         with st.form("quick_import"):
             source = st.text_input("Local video path", key="quick_source")
             name = st.text_input("Video name (optional)", key="quick_name")
@@ -110,11 +140,15 @@ def _stage_text(checkpoint):
                 f"of {checkpoint['seconds_total']:.0f}s")
     if stage == "checking_shots" and {"shot", "shots"} <= set(checkpoint):
         return f"Checking possible shot {checkpoint['shot']} of {checkpoint['shots']} frame by frame"
+    if stage == "downloading":
+        done, total = checkpoint.get("bytes_done") or 0, checkpoint.get("bytes_total")
+        return (f"Downloading from YouTube · {done / 1e9:.2f} of ~{total / 1e9:.2f} GB" if total
+                else f"Downloading from YouTube · {done / 1e9:.2f} GB")
     return "Analyzing"
 
 
-def _run_here(store, job_id):
-    bar = st.progress(0., text="Starting… keep this page open.")
+def _run_here(store, job_id, starting="Starting… keep this page open."):
+    bar = st.progress(0., text=starting)
 
     def show(fraction, checkpoint=None):
         fraction = min(1., float(fraction))
@@ -158,8 +192,7 @@ def _results(store, game, clip, clock, advanced):
     job = clip.get("job") or {}
     _job_controls(store, job)
     result = clip.get("result")
-    if advanced:
-        render_detection_inspector(store, game, clip, result, fresh=bool(clip.get("fresh")))
+    render_detection_inspector(store, game, clip, result, fresh=bool(clip.get("fresh")))
     if not result:
         st.info("No result is available yet.")
         return
@@ -171,6 +204,20 @@ def _results(store, game, clip, clock, advanced):
     columns[0].metric("Attempts", len(events))
     columns[1].metric("Made", sum(e.get("result") == "made" for e in events))
     columns[2].metric("Missed", sum(e.get("result") == "missed" for e in events))
+    performance = result.get("performance", {})
+    if performance.get("elapsed_seconds") is not None:
+        elapsed = float(performance["elapsed_seconds"])
+        rate = performance.get("evaluated_frames_per_second")
+        inferred = performance.get("inferred_frames", result.get("frames_processed", 0))
+        cached = performance.get("cached_scan_frames", 0)
+        detail = f"{inferred} model calls this run"
+        if cached:
+            detail += f" · {cached} scan frames reused"
+        if rate is not None:
+            detail += f" · {float(rate):.1f} frames/s"
+        runtime = (f"{performance['cpu_threads']} CPU threads" if performance.get("cpu_threads")
+                   else str(performance.get("device", "model runtime")))
+        st.caption(f"Model analysis: {elapsed:.1f}s · {detail} · {runtime}")
     playback = clip.get("playback_path") or result.get("playback_path")
     if playback and Path(playback).is_file():
         st.video(str(playback))
@@ -228,6 +275,8 @@ def render_quick_analysis(store, game, clock, advanced=False):
                                 value=min(20., duration), step=1., key=f"quick_duration_{game['id']}")
     end = min(start + length, offset + duration)
     st.caption(f"Analyzes {clock(start)}–{clock(end)} ({end-start:g}s).")
+    st.caption(f"Fast CPU profile evaluates about {math.ceil((end-start) * 5)} frames in the initial scan, "
+               "then checks only possible shot windows more closely.")
     default_weights = default_ball_rim_weights()
     setup = _hints(game, start, offset, default_weights)
     weights = bundle = ""

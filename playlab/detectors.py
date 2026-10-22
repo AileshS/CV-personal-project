@@ -47,11 +47,27 @@ class BasketballDetector:
         os.environ.setdefault("YOLO_CONFIG_DIR", str(model_dir.parent / "ultralytics"))
         os.environ.setdefault("MPLCONFIGDIR", str(model_dir.parent / "matplotlib"))
         os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+        # PyTorch can expose every host core to each inference call. On shared
+        # and laptop CPUs that oversubscription is dramatically slower for
+        # these small frames (and can make the UI unresponsive).
+        if str(device) == "cpu":
+            threads = max(1, min(4, os.cpu_count() or 1))
+            os.environ.setdefault("OMP_NUM_THREADS", str(threads))
+            os.environ.setdefault("MKL_NUM_THREADS", str(threads))
         try:
             from ultralytics import YOLO
         except ImportError as exc:
             raise RuntimeError("Learned detection needs the optional vision dependencies. "
                                "Install with `uv sync --extra vision`.") from exc
+        if str(device) == "cpu":
+            import torch
+            torch.set_num_threads(threads)
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                # PyTorch permits this setting only before parallel work starts.
+                # A prior detector in this process already established the pool.
+                pass
         if weights and not Path(weights).is_file():
             raise FileNotFoundError(f"Ball/rim weights were not found: {weights}")
         self.people = YOLO(str(model_dir / "yolo11n.pt"))
@@ -94,6 +110,30 @@ class BasketballDetector:
         result = self.people.predict(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), classes=[0], conf=0.15,
                                      imgsz=640, device=self.device, verbose=False)[0]
         return _boxes(result)["players"]
+
+    def diagnostic(self, frame):
+        """Best weak candidate per supported class, independent of tracking/outcomes.
+
+        Class filtering happens before NMS so people cannot suppress weak balls.
+        This reporting floor is deliberately tiny; these are guesses, not evidence
+        sufficient to assert a shot outcome.
+        """
+        model = self.objects if self.objects is not None else self.people
+        names = model.names
+        names = names.items() if isinstance(names, dict) else enumerate(names)
+        classes = [int(i) for i, name in names if str(name).lower() in
+                   {"ball", "basketball", "sports ball", "rim", "hoop", "basketball rim"}]
+        output = {"balls": [], "rims": [], "players": []}
+        if not classes:
+            return output
+        result = model.predict(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), classes=classes,
+                               conf=0.000001, imgsz=960, max_det=100,
+                               device=self.device, verbose=False)[0]
+        candidates = _boxes(result, custom=self.objects is not None)
+        for key in ("balls", "rims"):
+            if candidates[key]:
+                output[key] = [max(candidates[key], key=lambda item: item["confidence"])]
+        return output
 
 
 class ColorCandidateDetector:

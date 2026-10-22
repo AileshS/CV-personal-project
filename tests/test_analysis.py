@@ -61,9 +61,18 @@ def test_whole_possession_resumes_completed_chunks(tmp_path, fake_video):
     cancelled[0] = False
     result = analysis.analyze_possession(store, "p")
     assert result["chunks"] == 3
+    assert result["performance"]["scan_image_size"] == 960
+    assert result["performance"]["cpu_threads"] <= 4
+    assert result["performance"]["elapsed_seconds"] >= 0
+    assert result["performance"]["cached_scan_frames"] > 0
+    assert (result["performance"]["inferred_frames"] + result["performance"]["cached_scan_frames"]
+            == result["frames_processed"])
+    assert result["performance"]["evaluated_frames_per_second"] == pytest.approx(
+        result["performance"]["inferred_frames"] / result["performance"]["elapsed_seconds"])
     assert result["frames_processed"] >= 220  # complete 45-second span, no 600-frame truncation
     assert len(store.list("analysis_chunk")) == 3
-    assert FakeDetector.calls - first_count < first_count * 1.5
+    assert FakeDetector.calls - first_count == result["performance"]["inferred_frames"]
+    assert len(result["diagnostic_frames"]) == result["frames_processed"]
 
 
 def test_human_result_never_becomes_automatic_prediction(tmp_path, fake_video):
@@ -84,6 +93,11 @@ def test_human_result_never_becomes_automatic_prediction(tmp_path, fake_video):
     assert again["fingerprint"] == result["fingerprint"]
     assert again["events"][0]["result"] == "unknown"
     assert store.get("shot", "s")["result"] == "missed"
+    stages = {row["stage"] for row in result["diagnostic_frames"]}
+    assert stages == {"scan", "dense_shot_check", "release_players"}
+    assert all(set(row["raw_detections"]) >= {"balls", "rims"} for row in result["diagnostic_frames"])
+    assert all("players" in row["raw_detections"] for row in result["diagnostic_frames"]
+               if row["stage"] == "release_players")
 
 
 def test_corrected_release_invalidates_cache(tmp_path, fake_video):
