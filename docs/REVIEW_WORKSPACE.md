@@ -27,7 +27,7 @@ does not require loading a model:
 
 ```sh
 uv sync --locked --extra vision
-uv run --extra vision streamlit run app.py
+uv run --extra vision streamlit run labeling_app.py
 ```
 
 In a second terminal from the same checkout:

@@ -59,6 +59,17 @@ Drive. Use the same archive hashes when reconnecting. Its Drive/GPU cells have n
 been executed in this cloud session. Free Colab can expire; no keep-alive bypass or
 uninterrupted-training guarantee is provided.
 
+## Public ball/rim detector for Quick analysis
+
+`notebooks/train_ball_rim_colab.ipynb` is a single self-contained cell. It downloads
+public Roboflow Universe exports (free API key as the Colab secret
+`ROBOFLOW_API_KEY`), remaps their classes to `ball`/`rim`, fine-tunes `yolo11s` at
+960 px on a GPU, and writes `MyDrive/PlayLab/models/ball_rim.pt` plus a provenance
+JSON. Rerunning the cell after an expired runtime resumes from Drive. Copy the file
+to `artifacts/models/ball_rim.pt` (or set `PLAYLAB_BALL_RIM_WEIGHTS`); Quick analysis
+and `playlab analyze` then use it automatically. This data is separate from reviewed
+PlayLab labels, and its public validation scores are not an accuracy estimate.
+
 ## Validation before the held-out test
 
 Run equal-image detector comparisons on validation first:

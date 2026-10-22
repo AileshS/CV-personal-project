@@ -79,6 +79,22 @@ class BasketballDetector:
             output["balls"], output["rims"] = objects["balls"], objects["rims"]
         return output
 
+    def ball_rim(self, frame, imgsz=960):
+        """Ball and rim boxes only (no people): the per-frame cost of shot analysis."""
+        bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if self.objects is None:
+            result = self.people.predict(bgr, classes=[32], conf=0.15, imgsz=imgsz,
+                                         device=self.device, verbose=False)[0]
+            return {**_boxes(result), "players": []}
+        result = self.objects.predict(bgr, conf=0.12, imgsz=imgsz, device=self.device, verbose=False)[0]
+        return {**_boxes(result, custom=True), "players": []}
+
+    def players(self, frame):
+        """People in one frame, untracked; callers assign their own frame-local IDs."""
+        result = self.people.predict(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), classes=[0], conf=0.15,
+                                     imgsz=640, device=self.device, verbose=False)[0]
+        return _boxes(result)["players"]
+
 
 class ColorCandidateDetector:
     """Dependency-free diagnostic fallback, never a trained ball detector."""
@@ -102,6 +118,12 @@ class ColorCandidateDetector:
         # Do not arbitrarily choose among the floor, jerseys and multiple balls.
         return {"balls": candidates if len(candidates) == 1 else [], "rims": [], "players": []}
 
+    def ball_rim(self, frame, imgsz=None):
+        return self(frame)
+
+    def players(self, frame):
+        return []
+
 
 def hex_rgb(value):
     value = str(value).lstrip("#")
@@ -110,17 +132,56 @@ def hex_rgb(value):
     return np.array([int(value[i:i + 2], 16) for i in (0, 2, 4)], dtype=float)
 
 
+def _torso(frame, bbox):
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
+    left, right = max(0, int(x1 + .2 * (x2 - x1))), min(w, int(x2 - .2 * (x2 - x1)))
+    top, bottom = max(0, int(y1 + .2 * (y2 - y1))), min(h, int(y1 + .55 * (y2 - y1)))
+    return frame[top:bottom, left:right]
+
+
+def torso_color(frame, bbox):
+    """Median torso color in CIELAB (8-bit OpenCV scale), or None when not visible."""
+    region = _torso(frame, bbox)
+    if not region.size:
+        return None
+    lab = cv2.cvtColor(np.ascontiguousarray(region), cv2.COLOR_RGB2LAB).reshape(-1, 3)
+    return [float(v) for v in np.median(lab, axis=0)]
+
+
+def assign_auto_teams(frames, minimum_players=12, minimum_separation=25.0):
+    """Cluster torso colors into two teams plus an 'other' group (officials, bench).
+
+    Players far from both team centers stay unresolved. Returns True when teams
+    were assigned. Labels are clip-local ("auto-0"/"auto-1"), not real team names.
+    """
+    rows = [p for f in frames for p in f.get("players", [])
+            if p.get("team") is None and p.get("torso") is not None]
+    if len(rows) < minimum_players:
+        return False
+    from sklearn.cluster import KMeans
+
+    colors = np.asarray([p["torso"] for p in rows], dtype=float)
+    if len(np.unique(colors, axis=0)) < 3:
+        return False
+    model = KMeans(n_clusters=3, n_init=5, random_state=0).fit(colors)
+    teams = [int(i) for i in np.argsort(np.bincount(model.labels_, minlength=3))[::-1][:2]]
+    separation = float(np.linalg.norm(model.cluster_centers_[teams[0]] - model.cluster_centers_[teams[1]]))
+    if separation < minimum_separation:
+        return False
+    for player, distances, label in zip(rows, model.transform(colors), model.labels_):
+        if label in teams and distances[label] <= .5 * separation:
+            player["team"] = f"auto-{teams.index(int(label))}"
+    return True
+
+
 def team_for_player(frame, bbox, colors, threshold=105.0):
     """Classify the torso only; unresolved color evidence remains unknown."""
     if isinstance(colors, list):
         colors = {str(i): color for i, color in enumerate(colors)}
     if not colors or len(colors) != 2:
         return None
-    h, w = frame.shape[:2]
-    x1, y1, x2, y2 = bbox
-    left, right = max(0, int(x1 + .2 * (x2 - x1))), min(w, int(x2 - .2 * (x2 - x1)))
-    top, bottom = max(0, int(y1 + .2 * (y2 - y1))), min(h, int(y1 + .55 * (y2 - y1)))
-    region = frame[top:bottom, left:right]
+    region = _torso(frame, bbox)
     if not region.size:
         return None
     pixels = region.reshape(-1, 3).astype(float)

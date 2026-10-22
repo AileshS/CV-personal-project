@@ -208,3 +208,52 @@ def test_detector_rejects_invalid_image_size_before_optional_imports(tmp_path, i
     (dataset / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="image_size"):
         train_detector(dataset, tmp_path / "run", image_size=image_size)
+
+
+# Ball centers relative to the detected rim box center, in rim widths, traced at
+# 30 fps from the 990 s clip (a shot that slid off the left of the rim). The box
+# includes the net (41 x 44 px), so the rim line is its top edge, not its center.
+MISS_990 = [(1004.63, -.39, -.89), (1004.67, -.40, -.90), (1004.70, -.41, -.91), (1004.73, -.42, -.91),
+            (1004.77, -.44, -.90), (1004.80, -.45, -.87), (1004.97, -.62, -.41), (1005.03, -.73, -.13),
+            (1005.07, -.79, .01), (1005.13, -.76, .55), (1005.17, -.76, .71), (1005.23, -.79, 1.32),
+            (1005.33, -.53, 1.50)]
+
+
+def _rows(trace, height=44 / 41):
+    return [{"time": t, "x": x, "y": y, "rim_x": 0, "rim_y": 0, "rim_width": 1, "rim_height": height}
+            for t, x, y in trace]
+
+
+def test_ball_falling_outside_the_rim_edge_is_missed_and_through_the_middle_is_made():
+    missed = compute_features(_rows(MISS_990))
+    assert missed["descent_abs_x"] == pytest.approx(.76, abs=.03)
+    assert geometry_prediction(missed) == "missed"
+    made = compute_features(_rows([(t, x * .15, y) for t, x, y in MISS_990]))
+    assert geometry_prediction(made) == "made"
+    between = compute_features(_rows([(t, x * .65, y) for t, x, y in MISS_990]))
+    assert geometry_prediction(between) == "unknown"  # ~0.5 rim widths: not confident either way
+    # Without the approach above the rim, a ball seen only below it decides nothing.
+    assert compute_features(_rows([r for r in MISS_990 if r[2] > 0]))["descent_abs_x"] is None
+
+
+# Rim-out from the 34:07 miss (rim box ~44 x 44 px): reaches the front of the rim,
+# then bounces back up and away to the left without dropping below it.
+RIM_OUT_3407 = [(2049.27, -.62, -1.83), (2049.30, -.45, -1.57), (2049.33, -.27, -1.30), (2049.37, -.10, -1.01),
+                (2049.40, .09, -.74), (2049.47, .07, -.68), (2049.50, -.13, -.87), (2049.53, -.27, -1.06),
+                (2049.60, -.58, -1.38), (2049.70, -1.00, -1.75), (2049.80, -1.48, -1.95), (2049.97, -2.23, -1.95)]
+# The 23:12 make: the arc above the rim was not detected, a stray sighting sits off
+# to the side, then the ball drops straight through the net.
+MADE_2312 = [(1392.33, .72, .83), (1393.27, -.15, .93), (1393.33, -.12, 1.33), (1393.40, -.05, 1.69),
+             (1393.47, .01, 2.10), (1393.53, .03, 2.61), (1393.60, .05, 3.13)]
+
+
+def test_rim_out_is_missed_and_unseen_arc_drop_through_net_is_made():
+    rim_out = compute_features(_rows(RIM_OUT_3407, height=1.0))
+    assert rim_out["bounced_out"] == 1 and rim_out["descent_abs_x"] is None
+    assert geometry_prediction(rim_out) == "missed"
+    made = compute_features(_rows(MADE_2312, height=.9))
+    assert made["descent_abs_x"] == pytest.approx(.1, abs=.05)
+    assert geometry_prediction(made) == "made"
+    # A ball moving slowly under the rim (e.g. held by a player) is not a drop through the net.
+    held = compute_features(_rows([(1393 + i * .2, .05, 1.0 + .05 * i) for i in range(6)], height=.9))
+    assert held["descent_abs_x"] is None and geometry_prediction(held) == "unknown"

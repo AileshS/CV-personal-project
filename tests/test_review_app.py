@@ -10,7 +10,7 @@ from playlab.media import source_fingerprint
 from playlab.review import load_batch
 from playlab.store import Store
 
-APP = Path(__file__).parents[1] / "app.py"
+APP = Path(__file__).parents[1] / "labeling_app.py"
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def batch_desk(tmp_path, monkeypatch):
 
 def browser(batch):
     at = AppTest.from_file(str(APP), default_timeout=15).run()
-    at.selectbox(key="workspace").set_value("Review batches").run()
+    at.toggle(key="advanced").set_value(True).run().selectbox(key="workspace").set_value("Review batches").run()
     at.text_input(key="review_manifest_path").set_value(str(batch.root / "manifest.json"))
     at.button(key="load_review_batch").click().run()
     assert not at.exception
@@ -55,7 +55,7 @@ def test_navigation_notes_survive_restart_and_never_accept_suggestions(batch_des
     at.button(key="save_review_notes").click().run()
     assert not at.exception
     restarted = AppTest.from_file(str(APP), default_timeout=15).run()
-    restarted.selectbox(key="workspace").set_value("Review batches").run()
+    restarted.toggle(key="advanced").set_value(True).run().selectbox(key="workspace").set_value("Review batches").run()
     assert not restarted.exception
     assert restarted.selectbox(key="review_frame").value == second
     assert restarted.text_area[0].value == "Uncertain control; retain offensive rebound"
@@ -121,7 +121,7 @@ def test_explicit_confirmation_exact_prefill_and_human_save(batch_desk):
 def test_stale_frame_editor_cannot_overwrite_concurrent_labels(batch_desk):
     store, _ = batch_desk
     at = AppTest.from_file(str(APP), default_timeout=15).run()
-    at.selectbox(key="workspace").set_value("Frame labels").run()
+    at.toggle(key="advanced").set_value(True).run().selectbox(key="workspace").set_value("Frame labels").run()
     at.radio(key="box_input_mode").set_value("Coordinate fields").run()
     # Another reviewer adds a box after this editor was rendered.
     store.save("box", {"id": "other", "game_id": "g", "possession_id": "p", "time": 0.,
@@ -201,7 +201,7 @@ def test_stale_correction_notes_require_reload(batch_desk):
 def test_changed_possession_blocks_stale_frame_edit(batch_desk):
     store, _ = batch_desk
     at = AppTest.from_file(str(APP), default_timeout=15).run()
-    at.selectbox(key="workspace").set_value("Frame labels").run()
+    at.toggle(key="advanced").set_value(True).run().selectbox(key="workspace").set_value("Frame labels").run()
     at.radio(key="box_input_mode").set_value("Coordinate fields").run()
     possession = store.get("possession", "p")
     store.save("possession", {**possession, "end": 119.})
@@ -255,7 +255,7 @@ def test_linked_boundary_edit_route_reload_requires_reconfirmation(batch_desk):
     at.number_input(key=f"edit_end_{target_id}_{target['revision']}").set_value(target['end'] + 1)
     at.button(key="save_possession").click().run()
     assert not at.exception
-    at.selectbox(key="workspace").set_value("Review batches").run()
+    at.toggle(key="advanced").set_value(True).run().selectbox(key="workspace").set_value("Review batches").run()
     assert not any(b.key == "open_review_frame" for b in at.button)
     at.button(key="reload_review").click().run()
     assert next(n for n in at.number_input if n.label == "Corrected possession end (source seconds)").value == target['end'] + 1

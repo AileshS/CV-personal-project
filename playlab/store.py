@@ -155,6 +155,17 @@ class Store:
             db.execute("UPDATE jobs SET status='running',updated_at=? WHERE id=?", (utcnow(), row["id"]))
         return {**self._job(row), "status": "running"}
 
+    def claim_job_by_id(self, job_id: str) -> dict | None:
+        """Claim one specific queued job; None if a worker already took it."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND status='queued' AND cancel_requested=0",
+                             (job_id,)).fetchone()
+            if row is None:
+                return None
+            db.execute("UPDATE jobs SET status='running',updated_at=? WHERE id=?", (utcnow(), job_id))
+        return {**self._job(row), "status": "running"}
+
     def update_job(self, job_id: str, *, progress=None, checkpoint=None, status=None, error=None):
         fields = {"updated_at": utcnow()}
         if progress is not None:

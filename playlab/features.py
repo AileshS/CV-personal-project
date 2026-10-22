@@ -16,6 +16,8 @@ def compute_features(observations: list[dict], max_observation_gap: float = 0.35
     """Normalize ball positions by visible rim width, with image y increasing down.
 
     Observations require time,x,y,rim_x,rim_y,rim_width in consistent coordinates.
+    An optional rim_height puts the rim line at the top of the rim box: detector
+    boxes usually include the net, so their center sits well below the rim.
     Occluded/missing positions must be omitted, never interpolated by the caller.
     A crossing is considered only between consecutive observations <=0.35 s apart.
     These are visual heuristics, not proof that a basket went through the net.
@@ -26,10 +28,11 @@ def compute_features(observations: list[dict], max_observation_gap: float = 0.35
             t, x, y, rx, ry, width = (
                 float(row[k]) for k in ("time", "x", "y", "rim_x", "rim_y", "rim_width")
             )
+            height = float(row.get("rim_height") or 0.0)
         except (KeyError, TypeError, ValueError):
             continue
-        if all(math.isfinite(v) for v in (t, x, y, rx, ry, width)) and width > 0:
-            points.append((t, (x - rx) / width, (y - ry) / width))
+        if all(math.isfinite(v) for v in (t, x, y, rx, ry, width, height)) and width > 0:
+            points.append((t, (x - rx) / width, (y - (ry - height / 2)) / width))
     points.sort()
     count = len(points)
     # JSON/SQLite use null for unavailable values; NaN is forbidden in records.
@@ -50,9 +53,26 @@ def compute_features(observations: list[dict], max_observation_gap: float = 0.35
     if crossings:
         result["below_after_above"] = 1.0
         result["below_x"] = min(crossings)
-    if count >= 4 and crossings and min(crossings) <= 0.4:
+    # Where the ball falls after reaching the rim: through the middle (made) or past
+    # the rim edge (missed). Robust to an oblique camera, where a single interpolated
+    # crossing can land between the two.
+    descent = _descent_offset(points)
+    bounced = _bounced_out(points)
+    result["descent_abs_x"] = descent
+    result["bounced_out"] = float(bounced)
+    result["min_rim_distance"] = min(math.hypot(x, y) for _, x, y in points)
+    made_cross = bool(crossings) and min(crossings) <= 0.4
+    falls_inside = descent is not None and descent <= 0.4
+    falls_outside = descent is not None and descent >= 0.6
+    # The fall below the rim is stronger evidence than one interpolated crossing or a
+    # bounce (a rattle-in bounces, then drops through), so it decides first.
+    if count >= 4 and falls_inside:
         result["geometry_result"] = "made"
-    elif count >= 4:
+    elif count >= 4 and (falls_outside or (bounced and descent is None)):
+        result["geometry_result"] = "missed"
+    elif count >= 4 and made_cross and descent is None:
+        result["geometry_result"] = "made"
+    elif count >= 4 and descent is None:
         # A miss requires a connected near-rim approach and subsequent lateral
         # departure. Absence of a detected crossing alone never establishes a miss.
         for a, b in pairs:
@@ -62,6 +82,44 @@ def compute_features(observations: list[dict], max_observation_gap: float = 0.35
                 result["geometry_result"] = "missed"
                 break
     return result
+
+
+def _descent_offset(points, near=1.5, window=0.8, minimum=3, drop_speed=2.0):
+    """Median |x| (rim widths) while the ball falls below the rim line near the rim.
+
+    Normally the ball is first seen above the rim line close to the rim. If that
+    approach was not seen, a ball emerging right under the rim and dropping fast
+    (>= drop_speed rim widths per second, as through a net) also counts. Needs at
+    least `minimum` sightings clearly below the line within `window` seconds.
+    """
+    approach = next((t for t, x, y in points if y < 0 and math.hypot(x, y) <= near), None)
+    below = [(t, x, y) for t, x, y in points
+             if (approach is None or t > approach) and 0.15 < y <= 2.5]
+    # After a seen approach, the first fall decides; otherwise use the first run that
+    # starts right under the rim and drops fast (a stray sighting cannot start it).
+    for i in (range(1) if approach is not None else range(len(below))):
+        run = [p for p in below[i:] if p[0] - below[i][0] <= window]
+        if len(run) < minimum:
+            continue
+        if approach is None:
+            first, last = run[0], run[-1]
+            emerging = first[2] <= 1.5 and abs(first[1]) <= 0.6
+            if not emerging or (last[2] - first[2]) / max(last[0] - first[0], 1e-6) < drop_speed:
+                continue
+        return float(np.median([abs(x) for _, x, _ in run]))
+    return None
+
+
+def _bounced_out(points, contact=0.8, away=1.5, window=1.0):
+    """The ball reached the rim from above, then went back up and away without dropping in."""
+    close = [(math.hypot(x, y), t, y) for t, x, y in points if y <= 0.15]
+    if not close:
+        return False
+    distance, touch, height = min(close)
+    if distance > contact:
+        return False
+    return any(touch < t <= touch + window and y < 0 and y <= height and math.hypot(x, y) >= away
+               for t, x, y in points)
 
 
 def geometry_prediction(features: dict) -> str:
