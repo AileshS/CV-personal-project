@@ -199,7 +199,12 @@ def perform(store: Store, job: dict, on_progress=None):
         raise InterruptedError("Job cancelled")
     task = job["task"]
     if task == "import":
-        result = import_game(store, payload["source"], payload.get("name"), cancelled=cancelled)
+        def downloaded(done, total):
+            progress(.95 * min(1., done / total) if total else 0.,
+                     {"stage": "downloading", "bytes_done": done, "bytes_total": total})
+
+        result = import_game(store, payload["source"], payload.get("name"), cancelled=cancelled,
+                             progress=downloaded)
         request_attention(store, f"setup:{result['id']}",
                           "A game is ready. Confirm its baskets/team colors, review possession proposals, "
                           "and assign dataset splits before labeling.")

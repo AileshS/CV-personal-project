@@ -243,3 +243,32 @@ def test_interrupted_in_process_run_stays_resumable(quick):
     assert not worker.run_job_now(store, clip["job_id"])  # only queued jobs are claimed
     store.resume_job(job["id"])
     assert store.jobs()[0]["status"] == "queued"
+
+
+def test_youtube_link_downloads_in_page_and_selects_the_video(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLAYLAB_DATA", str(tmp_path / "data"))
+    store = Store(tmp_path / "data")
+    url = "https://www.youtube.com/watch?v=4gf5l8sOJ34"
+
+    def fake_run(store_, job_id, on_progress=None):
+        on_progress(.5, {"stage": "downloading", "bytes_done": 1.1e9, "bytes_total": 2.3e9})
+        store_.save("game", {"id": "yt", "name": "St. Mark's vs Dallas", "source_path": str(tmp_path / "v.mp4"),
+                             "source_url": url, "duration": 7038.})
+        store_.update_job(job_id, status="done", progress=1)
+        return True
+
+    monkeypatch.setattr("playlab.quick_analysis_ui.run_job_now", fake_run)
+    at = browser()
+    at.text_input(key="quick_youtube_url").set_value("not a link")
+    at.button(key="quick_youtube_fetch").click().run()
+    assert any("Paste a YouTube link" in e.value for e in at.error) and not store.jobs()
+    at.text_input(key="quick_youtube_url").set_value(url)
+    at.button(key="quick_youtube_fetch").click().run()
+    assert not at.exception
+    job, = store.jobs()
+    assert job["task"] == "import" and job["payload"]["source"] == url and job["status"] == "done"
+    assert at.selectbox(key="game_choice").value == "yt"
+    # Pasting the same link again reuses the downloaded video instead of downloading twice.
+    at.text_input(key="quick_youtube_url").set_value(url)
+    at.button(key="quick_youtube_fetch").click().run()
+    assert len(store.jobs()) == 1

@@ -61,3 +61,37 @@ def test_invalid_video_and_seek_rejected(tmp_path):
         probe_video(invalid)
     with pytest.raises(ValueError):
         frame_at(invalid, -1)
+
+
+def test_youtube_download_uses_node_reports_size_progress_and_keeps_title(tmp_path, monkeypatch):
+    import json
+
+    from playlab import media
+
+    assert media.is_youtube_url("https://youtu.be/abc") and not media.is_youtube_url("https://vimeo.com/1")
+    monkeypatch.setattr(media.shutil, "which", lambda name: None if name == "deno" else "/bin/node")
+    assert media._js_runtime_args() == ["--js-runtimes", "node:/bin/node"]
+    sources, calls, seen = tmp_path / "store" / "sources", [], []
+
+    def capture(args, timeout=180, cancelled=None, poll=None):
+        calls.append(args)
+        if "--skip-download" in args:
+            return 0, b"abc 1000\n", b""
+        (sources / "abc.f137.mp4.part").write_bytes(b"x" * 400)
+        media.time.sleep(1.05)  # progress is throttled to once a second
+        poll()
+        video = sources / "abc.mp4"
+        video.write_bytes(b"video")
+        (sources / "abc.info.json").write_text(json.dumps({"title": "St. Mark's vs Dallas"}))
+        return 0, f"{video}\n".encode(), b""
+
+    monkeypatch.setattr(media, "_capture", capture)
+    monkeypatch.setattr(media, "probe_video", lambda path: {"duration": 7038., "width": 1920, "height": 1080})
+    monkeypatch.setattr(media, "source_fingerprint", lambda path: "fp")
+    game = media.import_game(Store(tmp_path / "store"), "https://www.youtube.com/watch?v=abc",
+                             progress=lambda done, total: seen.append((done, total)))
+    assert all("node:/bin/node" in args for args in calls)
+    assert seen[0] == (0, 1000) and (400, 1000) in seen     # partial file counted, info.json ignored
+    assert game["name"] == "St. Mark's vs Dallas" and game["source_url"].endswith("v=abc")
+    with pytest.raises(ValueError, match="YouTube only"):
+        media.download_source("https://example.com/v.mp4", sources)
