@@ -42,6 +42,8 @@ def fake_video(monkeypatch):
     monkeypatch.setattr(analysis, "iter_frames", iterator)
     monkeypatch.setattr(analysis, "frame_at", lambda *a, **kw: np.zeros((100, 160, 3), dtype=np.uint8))
     monkeypatch.setattr(analysis, "BasketballDetector", FakeDetector)
+    # Fakes produce no ball, so injected proposals skip the reached-the-rim confirmation.
+    monkeypatch.setattr(analysis, "_reached_rim", lambda features: True)
     FakeDetector.calls = 0
 
 
@@ -119,9 +121,17 @@ def test_teams_require_distinct_torso_color_evidence():
     assert team_for_player(frame, [0, 0, 100, 100], {"red": "#e61e1e", "blue": "#1414e6"}) is None
 
 
-def test_isolated_ball_near_rim_is_not_a_shot():
-    observations = [{"time": 1., "x": 50., "y": 30., "rim_x": 50., "rim_y": 30., "rim_width": 10.}]
-    assert analysis.shot_proposals(observations) == []
+def test_permissive_proposals_need_a_close_sighting_or_two_and_a_confirmed_rim_reach():
+    def at(time, distance):
+        return {"time": time, "x": 50. + 10 * distance, "y": 30., "rim_x": 50., "rim_y": 30., "rim_width": 10.}
+    assert analysis.shot_proposals([at(2., 1.2)]) == [2.]          # one sighting close to the rim
+    assert analysis.shot_proposals([at(2., 2.2)]) == []            # one farther sighting is not enough
+    assert analysis.shot_proposals([at(2., 2.2), at(2.8, 2.0)]) == [2.]
+    assert analysis.shot_proposals([at(2., 2.2), at(3.5, 2.0)]) == []
+    # The 30 fps re-check confirms a proposal only if the ball got within a rim width.
+    assert analysis._reached_rim({"min_rim_distance": .6})
+    assert not analysis._reached_rim({"min_rim_distance": 1.8})
+    assert not analysis._reached_rim({"min_rim_distance": None})
 
 
 def test_later_rebound_shot_does_not_enter_first_shot_evidence(tmp_path, fake_video, monkeypatch):
@@ -320,3 +330,62 @@ def test_missing_optional_weights_allow_honest_fallback_export_and_freeze(tmp_pa
     missing.parent.mkdir()
     missing.write_bytes(b"newly available weights")
     assert not analysis.analysis_is_fresh(store, result)
+
+
+def test_basket_hint_follows_a_camera_pan_and_is_withheld_when_lost():
+    rng = np.random.default_rng(0)
+    scene = rng.integers(0, 255, (300, 500, 3), dtype=np.uint8)
+    hint = [.40, .40, .46, .44]  # normalized rim box on the hint frame
+    template = analysis._rim_template(scene, hint)
+    panned = np.roll(scene, (-30, 50), axis=(0, 1))
+    box = analysis._track_rim(panned, template)
+    assert box is not None
+    assert box[0] == pytest.approx(hint[0] + 50 / 500, abs=.005)
+    assert box[1] == pytest.approx(hint[1] - 30 / 300, abs=.005)
+    unrelated = rng.integers(0, 255, (300, 500, 3), dtype=np.uint8)
+    assert analysis._track_rim(unrelated, template) is None
+    assert analysis._track_rim(np.zeros_like(scene), template) is None
+
+
+def test_auto_teams_split_two_uniforms_and_leave_officials_unresolved():
+    from playlab.detectors import assign_auto_teams
+    white, navy, stripes = [250., 128., 128.], [40., 140., 100.], [120., 128., 128.]
+    frames = [{"players": [{"torso": white} for _ in range(8)] + [{"torso": navy} for _ in range(7)]
+               + [{"torso": stripes}]}]
+    assert assign_auto_teams(frames)
+    players = frames[0]["players"]
+    assert {p["team"] for p in players[:8]} == {players[0]["team"]}
+    assert {p["team"] for p in players[8:15]} == {players[8]["team"]} != {players[0]["team"]}
+    assert players[15].get("team") is None
+    assert not assign_auto_teams([{"players": [{"torso": white} for _ in range(20)]}])
+
+
+def test_progress_moves_within_a_chunk_and_names_the_stage(tmp_path, fake_video):
+    store = fixture_store(tmp_path, duration=20)
+    reports = []
+    analysis.analyze_possession(store, "p", progress=lambda fraction, checkpoint: reports.append((fraction, checkpoint)))
+    detecting = [(f, c) for f, c in reports if c.get("stage") == "detecting"]
+    assert len(detecting) >= 5
+    fractions = [f for f, _ in detecting]
+    assert fractions == sorted(fractions) and 0 < fractions[0] < fractions[-1] < .85
+    assert detecting[-1][1]["seconds_total"] == 20
+    assert reports[-1][0] == 1.0
+
+
+def test_rim_crop_keeps_arc_room_and_maps_boxes_back_to_frame():
+    crop = analysis._rim_crop([600, 100, 640, 110], 1280, 720)
+    left, top, right, bottom = crop
+    assert right - left == bottom - top == 240          # 3 rim widths each side
+    assert left <= 600 and right >= 640 and top == 0      # clamped at the top edge
+    edge = analysis._rim_crop([1260, 700, 1280, 710], 1280, 720)
+    assert edge[2] <= 1280 and edge[3] <= 720
+
+    class Cropped:
+        def ball_rim(self, frame, imgsz):
+            Cropped.seen = (frame.shape, imgsz)
+            return {"balls": [{"bbox": [10, 20, 14, 24], "confidence": .9}], "rims": [], "players": []}
+
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    found = analysis._cropped_ball_rim(Cropped(), frame, crop)
+    assert Cropped.seen == ((240, 240, 3), 192)           # 240 px crop at the full-frame 0.75 scale
+    assert found["balls"][0]["bbox"] == [10 + left, 20 + top, 14 + left, 24 + top]

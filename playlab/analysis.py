@@ -10,7 +10,14 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from playlab.dataset import canonical_hash, file_hash
-from playlab.detectors import BasketballDetector, ColorCandidateDetector, nearest_defender, team_for_player
+from playlab.detectors import (
+    BasketballDetector,
+    ColorCandidateDetector,
+    assign_auto_teams,
+    nearest_defender,
+    team_for_player,
+    torso_color,
+)
 from playlab.features import compute_features, geometry_prediction, predict_result
 from playlab.media import frame_at, iter_frames
 
@@ -27,6 +34,20 @@ def analysis_record_id(possession_id, mode="assisted"):
 def _default_model_path():
     model_dir = Path(os.environ.get("PLAYLAB_MODEL_DIR", Path(__file__).parents[1] / "artifacts" / "models"))
     return (model_dir / "yolo11n.pt").resolve()
+
+
+def default_ball_rim_weights():
+    """Ball/rim weights used when none are requested; COCO alone has no rim class.
+
+    PLAYLAB_BALL_RIM_WEIGHTS is an explicit choice and is returned even if missing,
+    so a broken configuration fails loudly. Otherwise `ball_rim.pt` beside the
+    default model is used only when present.
+    """
+    configured = os.environ.get("PLAYLAB_BALL_RIM_WEIGHTS")
+    if configured:
+        return Path(configured).resolve()
+    path = _default_model_path().parent / "ball_rim.pt"
+    return path if path.is_file() else None
 
 
 def _artifact_versions(weights, model_bundle):
@@ -137,19 +158,121 @@ def _rim(detections, setup, width, height):
     return None
 
 
+RIM_MATCH_THRESHOLD = .6
+SCAN_FPS = 5        # ball/rim scan rate; each proposed shot is re-checked at DENSE_FPS
+DENSE_FPS = 30
+CROP_RIM_WIDTHS = 3.0
+# Full frames are 1280 px wide and inferred at 960, so crops keep that 0.75 scale.
+CROP_SCALE = 960 / 1280
+
+
+def _ball_rim(detector, frame, imgsz=960):
+    return detector.ball_rim(frame, imgsz) if hasattr(detector, "ball_rim") else detector(frame)
+
+
+def _people(detector, frame):
+    return detector.players(frame) if hasattr(detector, "players") else detector(frame).get("players", [])
+
+
+def _rim_crop(rim_box, width, height, reach=CROP_RIM_WIDTHS):
+    """Square region around a rim with extra room above it for the shot arc."""
+    x1, y1, x2, y2 = rim_box
+    rim_width = max(x2 - x1, 8.)
+    half = min(max(96., reach * rim_width), width / 2, height / 2)
+    # Centered half a rim width above the rim: room for the arc and the drop through the net.
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2 - rim_width / 2
+    left = int(max(0, min(width - 2 * half, cx - half)))
+    top = int(max(0, min(height - 2 * half, cy - half)))
+    return left, top, int(left + 2 * half), int(top + 2 * half)
+
+
+def _cropped_ball_rim(detector, frame, crop):
+    """Detect only inside the crop, at the same scale as full-frame inference; boxes in frame pixels."""
+    left, top, right, bottom = crop
+    imgsz = max(160, int(round(max(right - left, bottom - top) * CROP_SCALE / 32)) * 32)
+    detections = _ball_rim(detector, np.ascontiguousarray(frame[top:bottom, left:right]), imgsz)
+    for key in ("balls", "rims"):
+        for box in detections.get(key, []):
+            x1, y1, x2, y2 = box["bbox"]
+            box["bbox"] = [x1 + left, y1 + top, x2 + left, y2 + top]
+    return detections
+
+
+def _rim_template(frame, box):
+    """Grayscale rim-plus-backboard patch from the hint frame; box is normalized."""
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = box[0] * w, box[1] * h, box[2] * w, box[3] * h
+    bw, bh = x2 - x1, y2 - y1
+    left, right = max(0, int(x1 - bw)), min(w, int(np.ceil(x2 + bw)))
+    top, bottom = max(0, int(y1 - 2 * bh)), min(h, int(np.ceil(y2 + bh)))
+    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    return {"patch": gray[top:bottom, left:right], "offset": (x1 - left, y1 - top), "size": (bw, bh)}
+
+
+def _track_rim(frame, template):
+    """Relocate the hinted rim after pans or cuts; None when this view does not match."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    patch = template["patch"]
+    if not patch.size or patch.shape[0] > gray.shape[0] or patch.shape[1] > gray.shape[1]:
+        return None
+    scores = cv2.matchTemplate(gray, patch, cv2.TM_CCOEFF_NORMED)
+    _, best, _, (x, y) = cv2.minMaxLoc(scores)
+    if not np.isfinite(best) or best < RIM_MATCH_THRESHOLD:
+        return None
+    h, w = gray.shape
+    (ox, oy), (bw, bh) = template["offset"], template["size"]
+    box = [max(0., (x + ox) / w), max(0., (y + oy) / h), min(1., (x + ox + bw) / w), min(1., (y + oy + bh) / h)]
+    return box if box[0] < box[2] and box[1] < box[3] else None
+
+
+def _ball_observation(detections, rim, at, last_ball, width):
+    """Pick one unambiguous, plausibly moving ball; returns (rim-relative row or None, last_ball)."""
+    balls = sorted(detections.get("balls", []), key=lambda b: b["confidence"], reverse=True)
+    if not balls:
+        return None, last_ball
+    # Reject ambiguous detections and implausible jumps instead
+    # of allowing a distractor to fabricate a rim crossing.
+    if len(balls) > 1 and balls[0]["confidence"] - balls[1]["confidence"] <= .2:
+        return None, last_ball
+    x, y = _center(balls[0])
+    if last_ball and at - last_ball[0] < .35 and np.hypot(x - last_ball[1], y - last_ball[2]) > width * .18:
+        return None, last_ball
+    if not rim:
+        return None, (at, x, y)
+    rx, ry = _center(rim)
+    return ({"time": float(at), "x": float(x), "y": float(y), "rim_x": rx, "rim_y": ry,
+             "rim_width": rim["bbox"][2] - rim["bbox"][0], "rim_height": rim["bbox"][3] - rim["bbox"][1],
+             "confidence": float(balls[0]["confidence"])},
+            (at, x, y))
+
+
+def _rim_distance(point):
+    return np.hypot(point["x"] - point["rim_x"], point["y"] - point["rim_y"]) / point["rim_width"]
+
+
+def _reached_rim(features, within=1.0):
+    """Confirms a permissive proposal: the dense re-check saw the ball within a rim width."""
+    distance = features.get("min_rim_distance")
+    return distance is not None and distance <= within
+
+
 def shot_proposals(observations, minimum_spacing=3.0):
-    """Discover isolated rim approaches; timestamps are release candidates only."""
+    """Rim approaches worth a dense re-check; timestamps are release candidates only.
+
+    The 5 fps scan often sees a shot only once or twice near the rim, so this is
+    deliberately permissive: one sighting within 1.5 rim widths, or two within 2.5
+    inside one second. The 30 fps re-check then confirms or drops each candidate.
+    """
     proposals = []
     for i, point in enumerate(observations):
         if point.get("rim_width", 0) <= 0:
             continue
-        distance = np.hypot(point["x"] - point["rim_x"], point["y"] - point["rim_y"]) / point["rim_width"]
+        distance = _rim_distance(point)
         if distance > 2.5:
             continue
-        neighbors = [p for p in observations[max(0, i - 8):i + 9]
-                     if abs(p["time"] - point["time"]) <= .8]
-        # A single orange spot near a hoop is insufficient evidence of a shot.
-        if len(neighbors) < 4 or max(p["y"] for p in neighbors) - min(p["y"] for p in neighbors) < point["rim_width"] * .5:
+        close = [p for p in observations if p.get("rim_width", 0) > 0 and _rim_distance(p) <= 2.5
+                 and 0 < abs(p["time"] - point["time"]) <= 1.0]
+        if distance > 1.5 and not close:
             continue
         time = max(observations[0]["time"], point["time"] - 1.5)
         if proposals and time - proposals[-1] < minimum_spacing:
@@ -233,7 +356,49 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
     warnings = []
     observations, frames, modes = [], [], set()
     previous_view = None
-    manual_view_invalid = False
+    hint = setup.get("rim_box") or setup.get("rim")
+    rim_template = None
+
+    def ensure_detector():
+        nonlocal detector
+        if detector is not None:
+            return detector
+        try:
+            detector = BasketballDetector(weights, device)
+        except Exception as exc:
+            if weights or str(device) != "cpu":
+                raise RuntimeError(f"Requested detector/device could not start ({device}): {exc}") from exc
+            detector = ColorCandidateDetector()
+            warnings.append(f"Learned detector unavailable: {exc}. Using color candidates; no player tracks.")
+        # A first neural startup may download only its default model.
+        # Preserve all existing/custom snapshots so a concurrent model
+        # or classifier edit makes this result stale instead of silently
+        # attributing in-memory inference to the replacement file.
+        default_model = _default_model_path()
+        requested = {str(Path(p).resolve()) for p in (weights, model_bundle) if p}
+        if (str(default_model) not in requested
+                and str(default_model) in dependencies["unavailable_artifacts"]
+                and default_model.is_file()):
+            dependencies["artifacts"][str(default_model)] = file_hash(default_model)
+            dependencies["unavailable_artifacts"].remove(str(default_model))
+        return detector
+
+    def frame_rim(frame, detections):
+        # The basket hint is drawn on the interval's first frame. Image matching
+        # follows it through pans and cuts; frames where it is not found get no
+        # hinted rim rather than a stale fixed box.
+        nonlocal rim_template
+        hinted = {}
+        if hint:
+            if rim_template is None:
+                reference = frame_at(game["source_path"], start, max_width=1280)
+                if reference.shape != frame.shape:
+                    reference = cv2.resize(reference, (frame.shape[1], frame.shape[0]))
+                rim_template = _rim_template(reference, [float(v) for v in hint])
+            tracked = _track_rim(frame, rim_template)
+            hinted = {"rim_box": tracked} if tracked else {}
+        return _rim(detections, hinted, frame.shape[1], frame.shape[0])
+
     chunks = int(np.ceil((end - start) / 20))
     for index in range(chunks):
         if cancelled and cancelled():
@@ -241,82 +406,41 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
         chunk_id = f"{fingerprint}:{index}"
         saved = store.get("analysis_chunk", chunk_id)
         if saved is None:
-            if detector is None:
-                try:
-                    detector = BasketballDetector(weights, device)
-                except Exception as exc:
-                    if weights or str(device) != "cpu":
-                        raise RuntimeError(f"Requested detector/device could not start ({device}): {exc}") from exc
-                    detector = ColorCandidateDetector()
-                    warnings.append(f"Learned detector unavailable: {exc}. Using color candidates; no player tracks.")
-                # A first neural startup may download only its default model.
-                # Preserve all existing/custom snapshots so a concurrent model
-                # or classifier edit makes this result stale instead of silently
-                # attributing in-memory inference to the replacement file.
-                default_model = _default_model_path()
-                requested = {str(Path(p).resolve()) for p in (weights, model_bundle) if p}
-                if (str(default_model) not in requested
-                        and str(default_model) in dependencies["unavailable_artifacts"]
-                        and default_model.is_file()):
-                    dependencies["artifacts"][str(default_model)] = file_hash(default_model)
-                    dependencies["unavailable_artifacts"].remove(str(default_model))
+            ensure_detector()
             detector.reset()
             chunk_start, chunk_end = start + index * 20, min(end, start + (index + 1) * 20)
             chunk_rows, chunk_frames = [], []
             last_ball = None
-            view_segment = 0
+            # The scan finds balls and rims only; people are detected later, around each release.
             for at, frame in iter_frames(game["source_path"], start=max(start, chunk_start - .5),
-                                         end=chunk_end, sample_fps=10, max_width=1280):
+                                         end=chunk_end, sample_fps=SCAN_FPS, max_width=1280):
                 if cancelled and cancelled():
                     raise InterruptedError("Analysis cancelled; completed chunks can be resumed.")
                 view = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY), (96, 54))
                 view_changed = previous_view is not None and np.mean(cv2.absdiff(previous_view, view)) > 65
                 if view_changed:
-                    detector.reset()
-                    view_segment += 1
                     last_ball = None
-                    manual_view_invalid = True
-                    warnings.append("Strong view change reset player tracks; a fixed manual rim is withheld after it.")
+                    warnings.append("A strong camera view change broke the ball path.")
                 previous_view = view
-                detections = detector(frame)
+                detections = _ball_rim(detector, frame)
                 height, width = frame.shape[:2]
-                rim = _rim(detections, {} if manual_view_invalid else setup, width, height)
-                players = []
-                for p in detections.get("players", []):
-                    player = dict(p)
-                    raw_id = player.get("track_id")
-                    player["track_id"] = f"{index}:{view_segment}:{raw_id}" if raw_id is not None else None
-                    player["team"] = team_for_player(frame, player["bbox"], setup.get("team_colors"))
-                    players.append(player)
+                rim = frame_rim(frame, detections)
                 if at < chunk_start:
                     continue
-                chunk_frames.append({"time": float(at), "players": players, "rim": rim,
+                chunk_frames.append({"time": float(at), "players": [], "rim": rim,
                                      "raw_detections": {key: detections.get(key, []) for key in ("balls", "rims")},
                                      "width": width, "height": height, "detector_mode": detector.mode,
                                      "view_changed": bool(view_changed)})
-                balls = detections.get("balls", [])
-                if balls:
-                    # Reject ambiguous detections and implausible jumps instead
-                    # of allowing a distractor to fabricate a rim crossing.
-                    balls = sorted(balls, key=lambda b: b["confidence"], reverse=True)
-                    ball = balls[0] if len(balls) == 1 or balls[0]["confidence"] - balls[1]["confidence"] > .2 else None
-                    if ball is not None:
-                        x, y = _center(ball)
-                        if last_ball and at - last_ball[0] < .35 and np.hypot(x - last_ball[1], y - last_ball[2]) > width * .18:
-                            ball = None
-                        if ball is not None:
-                            last_ball = (at, x, y)
-                            if rim:
-                                rx, ry = _center(rim)
-                                chunk_rows.append({"time": float(at), "x": float(x), "y": float(y),
-                                                   "rim_x": rx, "rim_y": ry,
-                                                   "rim_width": rim["bbox"][2] - rim["bbox"][0],
-                                                   "confidence": float(ball["confidence"])})
+                row, last_ball = _ball_observation(detections, rim, at, last_ball, width)
+                if row:
+                    chunk_rows.append(row)
+                if progress and len(chunk_frames) % 5 == 0:
+                    within = (at - chunk_start) / max(chunk_end - chunk_start, 1e-9)
+                    progress(.85 * (index + within) / chunks,
+                             {"stage": "detecting", "seconds_done": float(at - start), "seconds_total": end - start})
             saved = store.save("analysis_chunk", {"id": chunk_id, "observations": chunk_rows,
                                "frames": chunk_frames, "mode": detector.mode, "warnings": list(warnings),
-                               "manual_view_invalid": manual_view_invalid,
                                "last_view": previous_view.tolist() if previous_view is not None else None})
-        manual_view_invalid = bool(saved.get("manual_view_invalid"))
         if saved.get("last_view") is not None:
             previous_view = np.asarray(saved["last_view"], dtype=np.uint8)
         observations.extend(saved["observations"])
@@ -329,6 +453,56 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
         raise ValueError("No video frames could be read within this possession.")
     observations.sort(key=lambda p: p["time"])
     frames.sort(key=lambda p: p["time"])
+
+    def nearby_rim(at, reach=1.0):
+        rims = [f for f in frames if f.get("rim") and abs(f["time"] - at) <= reach]
+        return min(rims, key=lambda f: abs(f["time"] - at))["rim"] if rims else None
+
+    def dense_observations(window_start, window_end, report=None):
+        # The scan misses most rim passes (~0.1-0.2 s); re-check each shot window densely,
+        # ball/rim only and, when a rim is known, only in a crop around it.
+        if "color_candidates_manual_rim" in modes or window_end <= window_start:
+            return []
+        active = ensure_detector()
+        if active.mode == ColorCandidateDetector.mode:
+            return []
+        rows, last_ball = [], None
+        for count, (at, frame) in enumerate(iter_frames(game["source_path"], start=window_start, end=window_end,
+                                                        sample_fps=DENSE_FPS, max_width=1280), 1):
+            if cancelled and cancelled():
+                raise InterruptedError("Analysis cancelled; completed chunks can be resumed.")
+            known = nearby_rim(at)
+            if known:
+                detections = _cropped_ball_rim(active, frame, _rim_crop(known["bbox"], frame.shape[1], frame.shape[0]))
+                rim = frame_rim(frame, detections) or known
+            else:
+                detections = _ball_rim(active, frame)
+                rim = frame_rim(frame, detections)
+            row, last_ball = _ball_observation(detections, rim, at, last_ball, frame.shape[1])
+            if row:
+                rows.append(row)
+            if report and count % 15 == 0:
+                report((at - window_start) / (window_end - window_start))
+        return rows
+
+    def release_players(release, tag):
+        """People at the release frame and +-0.4 s (extra samples for team colors); untracked."""
+        if "color_candidates_manual_rim" in modes:
+            return []
+        active = ensure_detector()
+        sets = []
+        for at, frame in iter_frames(game["source_path"], start=max(start, release - .4),
+                                     end=min(end, release + .41), sample_fps=2.5, max_width=1280):
+            people = []
+            for i, person in enumerate(_people(active, frame)):
+                player = {**person, "track_id": f"{tag}:{at:.1f}:{i}"}
+                player["team"] = team_for_player(frame, player["bbox"], setup.get("team_colors"))
+                if player["team"] is None and not setup.get("team_colors"):
+                    player["torso"] = torso_color(frame, player["bbox"])
+                people.append(player)
+            sets.append({"time": float(at), "players": people})
+        return sets
+
     candidates = [{"id": p["id"], "release": float(p["release"]), "shooter_id": p.get("shooter_id"),
                    "shot_type": p.get("shot_type", "field_goal"), "origin": "human_release_anchor"}
                   for p in annotations if p.get("release") is not None and start <= float(p["release"]) <= end]
@@ -338,6 +512,8 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                                "origin": "automatic_rim_approach", "shot_type": "field_goal"})
     events = []
     candidates.sort(key=lambda p: p["release"])
+    people_sets = [release_players(c["release"], c["id"]) for c in candidates]
+    auto_teams = not setup.get("team_colors") and assign_auto_teams([s for sets in people_sets for s in sets])
     for candidate_index, candidate in enumerate(candidates):
         release = candidate["release"]
         # An offensive rebound followed by a make must not turn the preceding
@@ -345,13 +521,24 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
         evidence_end = min(end, release + 5,
                            candidates[candidate_index + 1]["release"] - .05
                            if candidate_index + 1 < len(candidates) else end)
-        selected = [p for p in observations if release - .25 <= p["time"] <= evidence_end]
+        merged = {round(p["time"], 2): p for p in observations if release - .25 <= p["time"] <= evidence_end}
+        def report(within, done=candidate_index):
+            if progress:
+                progress(.85 + .1 * (done + min(1., within)) / len(candidates),
+                         {"stage": "checking_shots", "shot": done + 1, "shots": len(candidates)})
+
+        merged.update({round(p["time"], 2): p for p in
+                       dense_observations(max(start, release - .25), min(evidence_end, release + 3), report)})
+        selected = [merged[key] for key in sorted(merged)]
+        report(1.)
         if any(f.get("view_changed") and release - .25 <= f["time"] <= evidence_end for f in frames):
             # Separate camera views cannot establish one continuous ball path.
             selected = []
         features = compute_features(selected)
         features = {key: (None if isinstance(value, (float, np.floating)) and not np.isfinite(value) else value)
                     for key, value in features.items()}
+        if candidate["origin"] == "automatic_rim_approach" and not _reached_rim(features):
+            continue  # the dense re-check never saw the ball reach the rim: not a shot
         baseline = geometry_prediction(features)
         prediction = predict_result(model_bundle, features) if model_bundle else {
             "result": baseline, "score": None, "method": "provisional_geometry"}
@@ -359,7 +546,9 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
         # missed claim, even when it produces a visually plausible trajectory.
         if "color_candidates_manual_rim" in modes:
             prediction = {"result": "unknown", "score": None, "method": "color_diagnostic_only"}
-        release_frame = min(frames, key=lambda f: abs(f["time"] - release))
+        release_frame = (min(people_sets[candidate_index], key=lambda f: abs(f["time"] - release))
+                         if people_sets[candidate_index] else
+                         {**min(frames, key=lambda f: abs(f["time"] - release)), "players": []})
         shooter = _shooter(release_frame["players"], selected, release, candidate.get("shooter_id"))
         if candidate["shot_type"] == "free_throw":
             defender = {"status": "not_applicable", "reason": "Free throw"}
@@ -368,8 +557,6 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
             if candidate["origin"] != "human_release_anchor" and defender.get("status") == "approximate":
                 defender["release_unconfirmed"] = True
                 defender["reason"] = "Suggested at an estimated release; confirm the release and highlighted shooter."
-                if game.get("quick_analysis_context"):
-                    defender = {"status": "unknown", "reason": "Release and shooter require review."}
         image_path = store.root / "evidence" / fingerprint / f"{len(events):04d}.png"
         evidence = _evidence(game["source_path"], release_frame["time"], release_frame["players"],
                              shooter, defender, image_path,
@@ -383,11 +570,13 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                        "baseline_result": baseline, "features": features,
                        "shooter_id": shooter, "defender": defender, "evidence_path": evidence,
                        "reviewed": False, "source": "prediction", "status": "needs_review"})
-    if not setup.get("team_colors"):
+    if auto_teams:
+        warnings.append("Teams were estimated by clustering uniform colors; set both colors to override.")
+    elif not setup.get("team_colors"):
         warnings.append("Set both uniform colors to identify opposing teams.")
     warnings.append("Uniform-color tracking does not reliably exclude benches or officials; review the highlighted players.")
-    if setup.get("rim_box") or setup.get("rim"):
-        warnings.append("A manual rim box is valid only for its corrected camera view; review it after pans or cuts.")
+    if hint:
+        warnings.append("The basket hint is relocated by image matching; frames where it is not found have no hinted rim.")
     if not events:
         warnings.append("No dependable shot proposals. Add a shot release anchor, correct the rim view, and reanalyze.")
     current_possession = store.get("possession", possession_id)

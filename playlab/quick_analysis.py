@@ -152,9 +152,6 @@ class _IntervalStore:
                 else:
                     event["reason"] = "Provisional visual evidence; inspect the estimated release and trajectory."
                 event["review_reason"] = event["reason"]
-                # Estimated release alone cannot support a defender claim.
-                if not event.get("release_confirmed") and event.get("defender", {}).get("status") == "approximate":
-                    event["defender"] = {"status": "unknown", "reason": "Release and shooter require review."}
             record["shots"] = record["events"]
             record["warnings"] = [w for w in record["warnings"] if "Add a shot release anchor" not in w]
             if not record["events"]:
@@ -183,6 +180,7 @@ def queue_analysis_clip(store, game_id, start, end, *, device="cpu", weights=Non
     _allow_interval(game, start, end)
     game["quick_source_fingerprint"] = _source_identity(game)
     setup = _setup(setup)
+    weights = weights or analysis.default_ball_rim_weights()
     request = {"game_id": game_id, "start": start, "end": end, "setup": setup,
                "device": str(device), "weights": str(Path(weights).resolve()) if weights else None,
                "model_bundle": str(Path(model_bundle).resolve()) if model_bundle else None}
@@ -284,6 +282,8 @@ def perform_analysis_clip(store, payload, *, cancelled=None, progress=None):
     preview_state = adapter.root / "playback-source.json"
     source_state = {"source": analysis._file_version(game["source_path"]), "start": clip["start"], "end": clip["end"]}
     if not path.is_file() or not preview_state.is_file() or json.loads(preview_state.read_text()) != source_state:
+        if progress:
+            progress(0., {"stage": "preparing_playback", "clip_id": clip["id"]})
         clip_video(game["source_path"], path, clip["start"], clip["end"], cancelled=cancelled)
         preview_state.write_text(json.dumps(source_state))
     if progress:

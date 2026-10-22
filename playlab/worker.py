@@ -182,7 +182,7 @@ def ensure_tracking_worker(store: Store):
             "recovered": recovered, "log_path": str(log_path)}
 
 
-def perform(store: Store, job: dict):
+def perform(store: Store, job: dict, on_progress=None):
     job_id, payload = job["id"], job["payload"]
 
     def cancelled():
@@ -190,6 +190,8 @@ def perform(store: Store, job: dict):
 
     def progress(fraction, checkpoint=None):
         store.update_job(job_id, progress=fraction, checkpoint=checkpoint)
+        if on_progress:
+            on_progress(fraction, checkpoint or {})
         if cancelled():
             raise InterruptedError("Job cancelled; completed stages are retained")
 
@@ -248,12 +250,9 @@ def perform(store: Store, job: dict):
     return result
 
 
-def work_once(store: Store) -> bool:
-    job = store.claim_job()
-    if job is None:
-        return False
+def _run_claimed(store: Store, job: dict, on_progress=None):
     try:
-        perform(store, job)
+        perform(store, job, on_progress)
         store.update_job(job["id"], status="cancelled" if store.cancelled(job["id"]) else "done", progress=1)
     except InterruptedError as error:
         store.update_job(job["id"], status="cancelled", error=str(error))
@@ -261,6 +260,27 @@ def work_once(store: Store) -> bool:
         store.update_job(job["id"], status="failed", error=f"{type(error).__name__}: {error}")
         request_attention(store, f"job_failed:{job['id']}",
                           "A processing job failed. Open the Jobs view for the reason and resume after fixing it.")
+    except BaseException:
+        # A Streamlit rerun/stop interrupts in-process work; keep it resumable
+        # instead of leaving a job marked running with no process behind it.
+        store.update_job(job["id"], status="cancelled", error="Interrupted by leaving the page; resume to continue.")
+        raise
+
+
+def work_once(store: Store) -> bool:
+    job = store.claim_job()
+    if job is None:
+        return False
+    _run_claimed(store, job)
+    return True
+
+
+def run_job_now(store: Store, job_id: str, on_progress=None) -> bool:
+    """Run one queued job in this process (the viewer); False if a worker already claimed it."""
+    job = store.claim_job_by_id(job_id)
+    if job is None:
+        return False
+    _run_claimed(store, job, on_progress)
     return True
 
 

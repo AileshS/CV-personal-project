@@ -1,10 +1,9 @@
 # Quick analysis
 
-This earlier shot-evidence workspace is now under **Advanced tools**. The default
-screen is the simpler ten-second ball/rim video flow in
-[TRACKED_VIDEO.md](TRACKED_VIDEO.md); it uses a compatible basketball/hoop model
-and returns scored boxes on playable video. The COCO limitations below describe
-this advanced workspace, not the new default tracking product.
+Quick analysis is the whole site (`streamlit run app.py`). The ten-second ball/rim
+video flow in [TRACKED_VIDEO.md](TRACKED_VIDEO.md) and the labeling tools are in
+`labeling_app.py`. With `artifacts/models/ball_rim.pt` present, Quick analysis uses
+that ball/rim model; the COCO limitations below apply only without it.
 
 Start with a short video interval, run inference, and inspect each proposed shot
 and its evidence. Possession cutting, frame selection, box labeling and dataset

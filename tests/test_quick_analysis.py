@@ -44,9 +44,32 @@ def lab(tmp_path, monkeypatch):
 
     monkeypatch.setattr(quick, "clip_video", playback)
     monkeypatch.setattr(analysis, "BasketballDetector", Detector)
+    # Fakes produce no ball, so injected proposals skip the reached-the-rim confirmation.
+    monkeypatch.setattr(analysis, "_reached_rim", lambda features: True)
     monkeypatch.setattr(analysis, "iter_frames", frames)
     monkeypatch.setattr(analysis, "frame_at", lambda *a, **kw: np.zeros((80, 100, 3), dtype=np.uint8))
+    # Real local ball/rim weights must not leak into fixture requests.
+    monkeypatch.setattr(analysis, "default_ball_rim_weights", lambda: None)
     return store, Detector
+
+
+def test_ball_rim_weights_are_discovered_and_recorded(lab, tmp_path, monkeypatch):
+    store, _ = lab
+    monkeypatch.undo()
+    monkeypatch.delenv("PLAYLAB_BALL_RIM_WEIGHTS", raising=False)
+    monkeypatch.setenv("PLAYLAB_MODEL_DIR", str(tmp_path / "models"))
+    (tmp_path / "models").mkdir()
+    assert analysis.default_ball_rim_weights() is None
+    weights = tmp_path / "models" / "ball_rim.pt"
+    weights.write_bytes(b"ball/rim weights fixture")
+    assert analysis.default_ball_rim_weights() == weights.resolve()
+    clip = quick.queue_analysis_clip(store, "g", 0, 20)
+    assert clip["weights"] == str(weights.resolve())
+    assert clip["requested_models"] == {str(weights.resolve()): quick.file_hash(weights)}
+    explicit = tmp_path / "other.pt"
+    monkeypatch.setenv("PLAYLAB_BALL_RIM_WEIGHTS", str(explicit))
+    # An explicit but missing configuration is returned so it fails loudly later.
+    assert analysis.default_ball_rim_weights() == explicit.resolve()
 
 
 @pytest.mark.parametrize("bounds", [(0, 61), (-1, 5), (89, 91), (1, 1), (0, .5), (float("nan"), 5)])
@@ -208,7 +231,7 @@ def test_evidence_burns_original_timestamp(lab, monkeypatch):
     assert json.dumps(raw, allow_nan=False)
 
 
-def test_unconfirmed_release_withholds_opponent_in_image_and_result(lab, monkeypatch):
+def test_unconfirmed_release_reports_flagged_opponent_in_image_and_result(lab, monkeypatch):
     store, _ = lab
     monkeypatch.setattr(analysis, "shot_proposals", lambda rows: [2.])
     monkeypatch.setattr(analysis, "_shooter", lambda *a, **kw: "shooter")
@@ -224,8 +247,10 @@ def test_unconfirmed_release_withholds_opponent_in_image_and_result(lab, monkeyp
     monkeypatch.setattr(analysis, "_evidence", evidence)
     clip = quick.queue_analysis_clip(store, "g", 0, 20)
     result = quick.perform_analysis_clip(store, {"clip_id": clip["id"]})
-    assert captured[0]["status"] == "unknown"
-    assert result["events"][0]["defender"]["status"] == "unknown"
+    assert captured[0]["status"] == "approximate"
+    defender = result["events"][0]["defender"]
+    assert defender["status"] == "approximate" and defender["track_id"] == "opponent"
+    assert defender["release_unconfirmed"] is True and "estimated release" in defender["reason"]
 
 
 def test_unavailable_neural_runtime_is_diagnostic_unknown(lab, monkeypatch):

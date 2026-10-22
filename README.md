@@ -5,14 +5,15 @@ possessions, analyzes selected possessions for made/missed shots, and suggests
 the closest visible opposing player at release using approximate image distance.
 Foul and turnover labels are manual. Predictions remain review-required.
 
-The default screen is **Track a 10-second clip**: choose a video and start time,
-select **Analyze**, then play or download the video with ball/rim boxes and detector
-scores. The worker starts automatically. No labeling, possession cutting or basket
-setup is required. See [the tracking-video guide](docs/TRACKED_VIDEO.md).
+The site (`app.py`) is **Quick analysis** only: open a video, pick up to 60 seconds,
+select **Analyze**, and read each shot attempt (made/missed, release frame, closest
+opponent) with its evidence. Short clips run in the viewer; no labeling, possession
+cutting or basket setup is required. See [the Quick analysis guide](docs/QUICK_ANALYSIS.md).
 
-The earlier Quick analysis and detailed annotation workspaces remain available
-behind **Advanced tools**. They are separate from the detection-video product.
-Made/missed recognition remains unverified; rendering boxes is not an outcome claim.
+Everything else lives in `labeling_app.py`, including **Tracking video** (a
+10-second clip with ball/rim boxes, see [the tracking-video guide](docs/TRACKED_VIDEO.md))
+and the labeling and review workspaces. Made/missed is checked only on a small set
+of hand-labeled shots so far; treat results as review-required.
 
 For the review-batch workspace and safe local integration steps, read
 [docs/REVIEW_WORKSPACE.md](docs/REVIEW_WORKSPACE.md). The preceding local results

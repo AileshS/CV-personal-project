@@ -7,7 +7,8 @@ from streamlit.testing.v1 import AppTest
 
 from playlab.store import Store
 
-APP = Path(__file__).parents[1] / "app.py"
+# The tracking video lives in the labeling app; app.py is Quick analysis only.
+APP = Path(__file__).parents[1] / "labeling_app.py"
 
 
 @pytest.fixture
@@ -28,6 +29,8 @@ def tracking(tmp_path, monkeypatch):
 
 def app():
     at = AppTest.from_file(str(APP), default_timeout=15).run()
+    at.toggle(key="advanced").set_value(True).run()
+    at.selectbox(key="workspace").set_value("Tracking video").run()
     assert not at.exception
     return at
 
@@ -35,12 +38,12 @@ def app():
 def test_default_empty_screen_is_one_simple_video_flow(tmp_path, monkeypatch):
     monkeypatch.setenv("PLAYLAB_DATA", str(tmp_path / "data"))
     at = app()
-    assert at.checkbox(key="advanced_tools").value is False
-    assert not at.selectbox and not at.number_input
+    assert at.selectbox(key="workspace").value == "Tracking video"
+    assert not at.main.selectbox and not at.main.number_input
     assert any("Upload or open a video" in item.value for item in at.info)
     assert not at.exception
     assert not Store(tmp_path / "data").jobs()
-    text = " ".join(item.value for item in at.markdown)
+    text = " ".join(item.value for item in at.main.markdown)
     for absent in ("possession", "label", "bundle", "made/missed", "unknown"):
         assert absent not in text.lower()
 
@@ -256,7 +259,7 @@ def test_failed_job_has_retry_and_advanced_nav_is_opt_in(tracking):
     at.button(key=f"tracking_retry_{request['id']}").click().run()
     assert not at.exception and store.jobs()[0]["status"] == "queued"
     assert len(calls) == 2
-    at.checkbox(key="advanced_tools").check().run()
-    assert not at.exception and at.selectbox(key="workspace").value == "Quick analysis"
-    at.checkbox(key="advanced_tools").uncheck().run()
+    at.selectbox(key="workspace").set_value("Quick analysis").run()
+    assert not at.exception and at.button(key="quick_analyze")
+    at.selectbox(key="workspace").set_value("Tracking video").run()
     assert not at.exception and at.button(key="tracking_analyze")

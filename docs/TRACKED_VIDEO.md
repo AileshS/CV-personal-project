@@ -4,7 +4,7 @@ From the project root, with Python 3.12 and uv:
 
 ```sh
 uv sync --locked --extra vision
-uv run --extra vision streamlit run app.py
+uv run --extra vision streamlit run labeling_app.py
 ```
 
 Keep `--extra vision` on subsequent uv commands in this environment. A plain
@@ -25,8 +25,8 @@ the video, including an existing excerpt's saved source offset. Processing runs 
 every output frame, capped at 30 fps and a 1280-pixel input width. No possessions,
 human labels or training examples are created.
 
-The simple screen is the default. The sidebar's **Advanced tools** checkbox opens
-the previous workspaces; their controls are not prerequisites for this product.
+Open it from the sidebar: turn on **Advanced**, then choose the **Tracking video**
+workspace. `app.py` itself shows only Quick analysis.
 
 ## Detector and scores
 

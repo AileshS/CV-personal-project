@@ -10,6 +10,7 @@ from playlab.quick_import import import_quick_source
 from playlab.store import Store
 
 APP = Path(__file__).parents[1] / "app.py"
+LABELING = Path(__file__).parents[1] / "labeling_app.py"
 
 
 @pytest.fixture
@@ -21,12 +22,13 @@ def quick(tmp_path, monkeypatch):
     game = store.save("game", {"id": "g", "name": "Clip", "source_path": str(source),
                                "duration": 50., "source_offset_seconds": 750., "split": "train",
                                "width": 320, "height": 180, "fps": 30.})
+    # Simulate a background worker claiming jobs; in-process runs are tested explicitly.
+    monkeypatch.setattr("playlab.quick_analysis_ui.run_job_now", lambda *a, **kw: False)
     return store, game
 
 
-def browser():
-    at = AppTest.from_file(str(APP), default_timeout=15).run()
-    at.checkbox(key="advanced_tools").check().run()
+def browser(app=APP):
+    at = AppTest.from_file(str(app), default_timeout=15).run()
     assert not at.exception
     return at
 
@@ -34,7 +36,8 @@ def browser():
 def test_empty_workspace_starts_at_quick_import(tmp_path, monkeypatch):
     monkeypatch.setenv("PLAYLAB_DATA", str(tmp_path))
     at = browser()
-    assert at.selectbox(key="workspace").value == "Quick analysis"
+    assert not at.toggle and not at.sidebar.selectbox  # Quick analysis is the whole site
+    assert not [s for s in at.selectbox if s.key == "workspace"]
     assert any("Open a local video to choose" in message.value for message in at.info)
     assert not Store(tmp_path).jobs()
 
@@ -44,7 +47,9 @@ def test_open_new_local_video_from_empty_workspace(tmp_path, monkeypatch):
     source = tmp_path / "new.mp4"
     source.write_bytes(b"metadata fixture")
     monkeypatch.setattr("playlab.quick_import.probe_video", lambda path: {"duration": 50.})
-    at = browser()
+    monkeypatch.setattr("playlab.quick_analysis_ui.run_job_now", lambda *a, **kw: False)
+    at = browser(LABELING)  # offset/provenance fields live in the labeling app
+    at.toggle(key="advanced").set_value(True).run()
     at.text_input(key="quick_source").set_value(str(source))
     at.text_input(key="quick_offset").set_value("750")
     at.button(key="quick_open").click().run()
@@ -166,7 +171,7 @@ def test_frame_inspector_old_result_supports_single_frame_without_reanalysis(qui
 
     import playlab.detection_inspector_ui as ui
     store, _ = quick
-    at = browser()
+    at = browser(LABELING)  # the frame inspector is a labeling-app tool
     at.button(key="quick_analyze").click().run()
     clip = store.list("analysis_clip")[0]
     monkeypatch.setattr(ui, "_native_frame", lambda *a: np.zeros((180, 320, 3), dtype=np.uint8))
@@ -177,6 +182,7 @@ def test_frame_inspector_old_result_supports_single_frame_without_reanalysis(qui
                 "raw_detections": {"balls": [{"bbox": [10, 20, 30, 40], "confidence": .75}], "rims": []}}
     monkeypatch.setattr(ui, "_predict_frame", predict)
     key = f"inspect_{clip['id']}"
+    at.toggle(key="advanced").set_value(True).run()
     at.checkbox(key=key+"_show").check().run()
     assert not at.exception
     assert any("no saved predictions" in m.value for m in at.info)
@@ -189,3 +195,51 @@ def test_frame_inspector_old_result_supports_single_frame_without_reanalysis(qui
     assert any("no saved predictions" in m.value for m in at.info)
     assert len(store.jobs()) == 1
     assert store.list("box") == [] and store.list("frame") == []
+
+
+def test_analyze_runs_in_process_and_shows_results(quick, monkeypatch):
+    store, _ = quick
+    import playlab.quick_analysis as quick_analysis
+    from playlab import worker
+
+    monkeypatch.setattr("playlab.quick_analysis_ui.run_job_now", worker.run_job_now)
+    calls = []
+
+    def fake_perform(store, payload, cancelled=None, progress=None):
+        calls.append(payload["clip_id"])
+        progress(.5, {"stage": "fixture"})
+        return {}
+
+    monkeypatch.setattr(quick_analysis, "perform_analysis_clip", fake_perform)
+    at = browser()
+    at.button(key="quick_analyze").click().run()
+    assert not at.exception
+    job = store.jobs()[0]
+    assert calls == [store.list("analysis_clip")[0]["id"]]
+    assert job["status"] == "done" and job["progress"] == 1
+
+
+def test_interrupted_in_process_run_stays_resumable(quick):
+    store, _ = quick
+    from playlab import quick_analysis, worker
+
+    clip = quick_analysis.queue_analysis_clip(store, "g", 0, 10)
+
+    class PageLeft(BaseException):
+        pass
+
+    def leave(fraction, checkpoint=None):
+        raise PageLeft
+
+    original = worker.perform
+    try:
+        worker.perform = lambda store, job, on_progress=None: on_progress(.2, {})
+        with pytest.raises(PageLeft):
+            worker.run_job_now(store, clip["job_id"], on_progress=leave)
+    finally:
+        worker.perform = original
+    job = store.jobs()[0]
+    assert job["status"] == "cancelled" and "resume" in job["error"]
+    assert not worker.run_job_now(store, clip["job_id"])  # only queued jobs are claimed
+    store.resume_job(job["id"])
+    assert store.jobs()[0]["status"] == "queued"

@@ -11,7 +11,7 @@ Run the viewer and worker in separate terminals from the project root:
 
 ```sh
 uv sync --locked
-uv run streamlit run app.py
+uv run streamlit run labeling_app.py
 uv run playlab worker
 ```
 
@@ -53,7 +53,7 @@ The default COCO baseline has no rim class. It can miss balls; missing suggestio
 are **not** negative labels. All suggestions are `reviewed: false` and are written
 only to the batch. Human annotations in SQLite are unchanged.
 Keep `--extra vision` on subsequent viewer, worker, analysis and export commands in
-that environment; for example `uv run --extra vision streamlit run app.py` and
+that environment; for example `uv run --extra vision streamlit run labeling_app.py` and
 `uv run --extra vision playlab worker`. A plain `uv run` can remove vision and make
 previous neural analysis features stale.
 

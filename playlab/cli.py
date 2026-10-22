@@ -119,7 +119,10 @@ def execute(args):
         from playlab.domain import save_possession
         return save_possession(store, args.game_id, args.start, args.end, reviewed=True, split=args.split)
     if command == "analyze":
-        payload = {"possession_id": args.possession_id, "device": args.device, "weights": args.weights,
+        from playlab.analysis import default_ball_rim_weights
+        weights = args.weights or default_ball_rim_weights()
+        payload = {"possession_id": args.possession_id, "device": args.device,
+                   "weights": str(weights) if weights else None,
                    "model_bundle": args.model_bundle, "mode": args.mode}
         if args.queue:
             return {"job_id": store.enqueue("analyze", payload)}
