@@ -19,14 +19,21 @@ DATASETS = [  # (workspace, project, version); check each license on its Univers
     ("dm-vision", "ballv2-hoopv2", 1),        # ~1.7k images, ball + hoop, CC BY 4.0
     ("eagle-eye", "basketball-1zhpe", 1),     # basketball + rim, CC BY 4.0
 ]
-DRIVE = Path("/content/drive/MyDrive/PlayLab")
-# Each new training run needs a NEW RUN_NAME. Run 01 trained on public data only;
-# run 02 continues from it with your own labeled frames mixed in.
-RUN_NAME = "ball-rim-yolo11s-02"
-CONTINUE_FROM = DRIVE / "runs/ball-rim-yolo11s-01/weights/best.pt"  # None = start from yolo11s.pt
+# The PlayLab folder holding your labeled frames (a copied folder may be named "PlayLab (1)").
+DRIVE = next((p for p in (Path("/content/drive/MyDrive/PlayLab"), Path("/content/drive/MyDrive/PlayLab (1)"))
+              if (p / "my-frames-v1.zip").is_file()), Path("/content/drive/MyDrive/PlayLab"))
+# Each new training run needs a NEW RUN_NAME. Run 01: public data only. Run 02: own frames
+# mixed in, cut off after 2 of 43 epochs. Run 03: that mix trained to completion (46 epochs).
+# Run 04 adds 100 labeled frames from a second gym (St. Mark's vs Dallas, training split).
+RUN_NAME = "ball-rim-yolo11s-04"
+CONTINUE_FROM = next((p for p in (DRIVE / "runs/ball-rim-yolo11s-03/weights/best.pt",
+                                  DRIVE / "runs/ball-rim-yolo11s-02/weights/best.pt",
+                                  DRIVE / "runs/ball-rim-yolo11s-01/weights/best.pt") if p.is_file()), None)
 # (zip in Drive, train repeat). Repeats weight your footage ~3x against public images.
-OWN_ZIPS = [(DRIVE / "my-frames-v1.zip", 3)]
+# Only my-frames-v1 has val frames, so own_val_* stays comparable with run 03.
+OWN_ZIPS = [(DRIVE / "my-frames-v1.zip", 3), (DRIVE / "my-frames-v2.zip", 3)]
 EPOCHS, IMAGE_SIZE, MAX_HOURS = 80, 960, 1.5  # broadcast balls are ~15px: keep 960
+MIN_EPOCHS = 15  # never export a run that stopped before this many epochs
 ULTRALYTICS = "ultralytics==8.4.183"          # matches the local vision runtime
 CLASSES = ("ball", "rim")                     # names playlab.detectors already maps
 
@@ -142,6 +149,17 @@ if "google.colab" in sys.modules:
             data=str(data), epochs=EPOCHS, time=MAX_HOURS, imgsz=IMAGE_SIZE, batch=-1,
             patience=20, project=str(runs), name=RUN_NAME, exist_ok=True, seed=0,
             plots=True, close_mosaic=10)
+    # Export only a run that ended on its own (all epochs, early stop or time budget) and
+    # trained long enough. A runtime that dies mid-run leaves last.pt with epoch >= 0.
+    results_csv = runs / RUN_NAME / "results.csv"
+    epochs_done = max(0, len(results_csv.read_text().strip().splitlines()) - 1) if results_csv.is_file() else 0
+    finished = last.is_file() and torch.load(last, map_location="cpu", weights_only=False).get("epoch", -1) == -1
+    print(f"{RUN_NAME}: {epochs_done} epochs trained, finished={finished}")
+    if not finished:
+        raise SystemExit("Training was interrupted. Rerun this cell to resume; nothing was exported.")
+    if epochs_done < MIN_EPOCHS:
+        raise SystemExit(f"Only {epochs_done} epochs before the run ended; not exporting. Set a new RUN_NAME, "
+                         f"CONTINUE_FROM = {runs / RUN_NAME / 'weights' / 'best.pt'} and a larger MAX_HOURS.")
     best = runs / RUN_NAME / "weights" / "best.pt"
     metrics = YOLO(str(best)).val(data=str(data), imgsz=IMAGE_SIZE, split="val", verbose=False)
     per_class = {CLASSES[i]: round(float(metrics.box.maps[i]), 4) for i in range(len(CLASSES))}
@@ -157,7 +175,7 @@ if "google.colab" in sys.modules:
     digest = hashlib.sha256(output.read_bytes()).hexdigest()
     provenance = {"datasets": DATASETS, "own_zips": [[str(a), r] for a, r in OWN_ZIPS], **own,
                   "counts": counts, "ultralytics": ULTRALYTICS,
-                  "base": str(CONTINUE_FROM or "yolo11s.pt"), "run": RUN_NAME,
+                  "base": str(CONTINUE_FROM or "yolo11s.pt"), "run": RUN_NAME, "epochs_trained": epochs_done,
                   "image_size": IMAGE_SIZE, "val_mAP50_95_per_class": per_class,
                   "val_mAP50": round(float(metrics.box.map50), 4), "sha256": digest,
                   "note": "own_val_* is scored on your held-out val-block frames; other scores mix public data."}

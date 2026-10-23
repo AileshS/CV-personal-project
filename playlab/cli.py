@@ -43,6 +43,8 @@ def parser():
     worker = sub.add_parser("worker")
     worker.add_argument("--once", action="store_true")
     worker.add_argument("--recover", action="store_true", help="Only after stopping the previous worker")
+    web = sub.add_parser("web", help="Run the shot-analysis website (http://localhost:8600)")
+    web.add_argument("--port", type=int, default=8600)
     sub.add_parser("status")
     resume = sub.add_parser("resume")
     resume.add_argument("job_id")
@@ -128,6 +130,10 @@ def execute(args):
             return {"job_id": store.enqueue("analyze", payload)}
         from playlab.analysis import analyze_possession
         return analyze_possession(store, **payload)
+    if command == "web":
+        from playlab.web import serve
+        serve(args.data, port=args.port)
+        return {"status": "website stopped"}
     if command == "worker":
         from playlab.worker import recover_worker, run_worker
         if args.recover:

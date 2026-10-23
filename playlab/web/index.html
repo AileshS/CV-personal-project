@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Play Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --page: #ececee; --shell: #f6f6f7; --card: #ffffff; --ink: #141416; --muted: #8b8b92; --line: #ececef;
+    --soft: #f4f4f6; --made: #2e9b55; --made-bg: #eaf7ee; --made-line: #cdebd8;
+    --miss: #d4483f; --miss-bg: #fdeeed; --miss-line: #f6d2cf; --unclear: #b7b7bd;
+    --radius: 22px; --shadow: 0 1px 2px rgba(20, 20, 22, .04), 0 8px 24px rgba(20, 20, 22, .04);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--page); color: var(--ink); font: 14px/1.4 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+         -webkit-font-smoothing: antialiased; }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  .shell { max-width: 1400px; margin: 24px auto; min-height: calc(100vh - 48px); background: var(--shell);
+           border-radius: 32px; display: grid; grid-template-columns: 232px 1fr; box-shadow: var(--shadow); }
+  /* Sidebar */
+  aside { padding: 28px 20px; display: flex; flex-direction: column; gap: 6px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; margin: 0 8px 26px; }
+  .brand svg { width: 34px; height: 34px; }
+  .side-title { color: var(--muted); font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; margin: 4px 12px 8px; }
+  .video-item { display: flex; flex-direction: column; gap: 2px; text-align: left; border: 0; background: none; padding: 11px 14px;
+                border-radius: 14px; transition: background .15s; }
+  .video-item:hover { background: rgba(255, 255, 255, .6); }
+  .video-item.active { background: var(--card); box-shadow: var(--shadow); }
+  .video-item .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .video-item .meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .add-video { margin-top: 8px; border: 1px dashed #d6d6db; background: none; border-radius: 14px; padding: 11px 14px;
+               color: var(--muted); text-align: left; display: flex; gap: 8px; align-items: center; }
+  .add-video:hover { color: var(--ink); border-color: #bdbdc3; }
+  /* Main */
+  main { padding: 28px 28px 32px 8px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  header h1 { font-size: 28px; font-weight: 600; letter-spacing: -.02em; margin: 0; flex: 1; min-width: 240px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pill-field { display: flex; align-items: center; gap: 8px; background: var(--card); border-radius: 999px; padding: 0 16px; height: 44px;
+                box-shadow: var(--shadow); }
+  .pill-field label { color: var(--muted); font-size: 12px; }
+  .pill-field input { border: 0; outline: 0; width: 82px; font-variant-numeric: tabular-nums; font-weight: 500; background: none; }
+  .pill-field select { border: 0; outline: 0; background: none; font-weight: 500; }
+  .primary { height: 44px; padding: 0 26px; border: 0; border-radius: 999px; background: #1b1b1d; color: #fff; font-weight: 600;
+             box-shadow: 0 6px 16px rgba(0, 0, 0, .18); transition: transform .12s, background .12s; }
+  .primary:hover { background: #000; } .primary:active { transform: scale(.97); }
+  .primary:disabled { background: #b9b9bf; box-shadow: none; cursor: default; }
+  .error { color: var(--miss); font-size: 13px; min-height: 18px; margin: -8px 4px 0; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 18px; align-items: start; }
+  .col { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+  .card { background: var(--card); border-radius: var(--radius); padding: 24px; box-shadow: var(--shadow); }
+  .card h2 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -.01em; }
+  .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .chip { border: 1px solid var(--line); border-radius: 999px; padding: 8px 14px; color: var(--muted); font-size: 13px;
+          font-variant-numeric: tabular-nums; background: var(--card); }
+  /* Stats */
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); background: var(--soft); border-radius: 18px; padding: 6px; gap: 6px; }
+  .stat { padding: 18px 20px; border-radius: 14px; }
+  .stat.lead { background: var(--card); box-shadow: var(--shadow); }
+  .stat .label { display: flex; gap: 8px; align-items: center; font-weight: 500; }
+  .stat .value { font-size: 52px; font-weight: 600; letter-spacing: -.04em; line-height: 1.1; margin-top: 10px; font-variant-numeric: tabular-nums; }
+  .badge { display: inline-flex; align-items: center; border-radius: 6px; padding: 2px 7px; font-size: 12px; font-weight: 600; border: 1px solid; }
+  .badge.made { color: var(--made); background: var(--made-bg); border-color: var(--made-line); }
+  .badge.missed { color: var(--miss); background: var(--miss-bg); border-color: var(--miss-line); }
+  .badge.unclear { color: var(--muted); background: var(--soft); border-color: var(--line); }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  /* Player */
+  .player { position: relative; border-radius: 16px; overflow: hidden; background: #0f0f10; aspect-ratio: 16 / 9; }
+  .player video { width: 100%; height: 100%; display: block; object-fit: contain; }
+  .player canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; cursor: pointer; user-select: none; }
+  .toggle input { appearance: none; width: 34px; height: 20px; border-radius: 99px; background: #e2e2e6; position: relative; margin: 0;
+                  cursor: pointer; transition: background .2s; }
+  .toggle input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff;
+                         box-shadow: 0 1px 3px rgba(0, 0, 0, .2); transition: transform .2s; }
+  .toggle input:checked { background: #1b1b1d; }
+  .toggle input:checked::after { transform: translateX(14px); }
+  .toggle input:focus-visible { outline: 2px solid #1b1b1d; outline-offset: 2px; }
+  .head-right { display: flex; align-items: center; gap: 12px; }
+  .controls { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+  .round { width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); display: grid; place-items: center; flex: none; }
+  .round:hover { background: var(--soft); }
+  .round svg { width: 16px; height: 16px; }
+  .clock { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; font-size: 15px; }
+  .clock small { color: var(--muted); font-weight: 500; margin-left: 6px; }
+  .scrub { position: relative; height: 44px; margin-top: 14px; touch-action: none; cursor: pointer; user-select: none; }
+  .track { position: absolute; left: 0; right: 0; top: 26px; height: 8px; background: #ececef; border-radius: 99px; }
+  .fill { position: absolute; left: 0; top: 26px; height: 8px; width: 0; background: #1b1b1d; border-radius: 99px; }
+  .knob { position: absolute; top: 20px; width: 20px; height: 20px; margin-left: -10px; border-radius: 50%; background: #fff;
+          border: 2px solid #1b1b1d; box-shadow: 0 2px 6px rgba(0, 0, 0, .15); }
+  .marker { position: absolute; top: 0; width: 12px; height: 18px; margin-left: -6px; border: 0; padding: 0; background: none; }
+  .marker::after { content: ""; position: absolute; left: 1px; top: 2px; width: 10px; height: 10px; border-radius: 50%; border: 2px solid #fff;
+                   box-shadow: 0 1px 3px rgba(0, 0, 0, .25); background: var(--c); }
+  .marker::before { content: ""; position: absolute; left: 5px; top: 13px; width: 2px; height: 13px; background: var(--c); opacity: .5; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  /* Lists */
+  .list { display: flex; flex-direction: column; gap: 4px; }
+  .list.scroll { max-height: 420px; overflow-y: auto; margin-right: -8px; padding-right: 4px; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 14px; border: 0; background: none; text-align: left; width: 100%; }
+  .row:hover { background: var(--soft); }
+  .row.active { background: var(--soft); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--c); }
+  .row .time { font-weight: 600; font-variant-numeric: tabular-nums; flex: 1; }
+  .row .grow { flex: 1; min-width: 0; }
+  .row .title { font-weight: 500; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); padding: 18px 4px; text-align: center; }
+  .hero { display: grid; place-items: center; text-align: center; padding: 70px 24px; gap: 10px; }
+  .hero h2 { font-size: 22px; }
+  .hero p { color: var(--muted); margin: 0 0 8px; }
+  /* Background jobs */
+  .tray { position: fixed; right: 28px; bottom: 28px; display: flex; flex-direction: column; gap: 10px; width: 320px; z-index: 20; }
+  .job { background: var(--card); border-radius: 18px; padding: 14px 16px; box-shadow: 0 12px 32px rgba(20, 20, 22, .14); }
+  .job-top { display: flex; justify-content: space-between; gap: 10px; font-weight: 600; }
+  .job-top .pct { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 500; }
+  .job .stage { color: var(--muted); font-size: 12px; margin: 2px 0 10px; }
+  .bar { position: relative; height: 8px; border-radius: 99px; background: #ededf0; overflow: hidden; }
+  .bar span { position: absolute; inset: 0; border-radius: 99px; transform-origin: left center; transform: scaleX(0);
+              background: linear-gradient(90deg, #67c587, #2e9b55); }
+  .bar span::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .55), transparent);
+                     transform: translateX(-100%); animation: shine 1.4s infinite; }
+  .job.done .bar span::after, .job.failed .bar span::after { display: none; }
+  .job.failed .bar span { background: var(--miss); }
+  .job.done { cursor: pointer; }
+  @keyframes shine { to { transform: translateX(100%); } }
+  /* Modal */
+  .scrim { position: fixed; inset: 0; background: rgba(20, 20, 22, .25); display: none; place-items: center; z-index: 30; }
+  .modal { width: min(520px, calc(100vw - 32px)); background: var(--card); border-radius: 24px; padding: 26px; box-shadow: 0 24px 60px rgba(0, 0, 0, .2); }
+  .modal h2 { margin: 0 0 6px; font-size: 20px; }
+  .modal p { color: var(--muted); margin: 0 0 18px; }
+  .modal input { width: 100%; height: 48px; border-radius: 14px; border: 1px solid var(--line); padding: 0 16px; outline: 0; background: var(--soft); }
+  .modal input:focus { border-color: #c9c9cf; background: #fff; }
+  .modal .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+  .ghost { height: 44px; padding: 0 20px; border-radius: 999px; border: 1px solid var(--line); background: var(--card); }
+  .toast { position: fixed; left: 50%; top: 24px; transform: translateX(-50%); background: #1b1b1d; color: #fff; padding: 12px 18px;
+           border-radius: 999px; box-shadow: 0 12px 32px rgba(0, 0, 0, .2); opacity: 0; pointer-events: none; z-index: 40; }
+  @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+  @media (max-width: 820px) {
+    .shell { grid-template-columns: 1fr; margin: 0; border-radius: 0; }
+    aside { padding-bottom: 0; } main { padding: 16px; }
+    .stats { grid-template-columns: 1fr; } .stat .value { font-size: 40px; }
+    .tray { left: 16px; right: 16px; width: auto; bottom: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside>
+    <div class="brand">
+      <svg viewBox="0 0 40 40" fill="none" stroke="#1b1b1d" stroke-width="2.2"><circle cx="20" cy="20" r="17"/><path d="M3 20h34M20 3v34M8 8c6 5 6 19 0 24M32 8c-6 5-6 19 0 24"/></svg>
+      Play Lab
+    </div>
+    <div class="side-title">Videos</div>
+    <div id="videos" class="list"></div>
+    <button class="add-video" id="add-video" type="button"><span aria-hidden="true">＋</span> Add video</button>
+  </aside>
+
+  <main>
+    <header>
+      <h1 id="title">Basketball shots</h1>
+      <div class="pill-field"><label for="start">Start</label><input id="start" value="00:00:00" inputmode="numeric" aria-label="Start time hh:mm:ss"></div>
+      <div class="pill-field"><label for="length">Length</label>
+        <select id="length"><option value="10">10 s</option><option value="20" selected>20 s</option><option value="30">30 s</option><option value="60">60 s</option></select>
+      </div>
+      <button class="primary" id="analyze" type="button">Analyze</button>
+    </header>
+    <div class="error" id="error" role="alert"></div>
+
+    <div id="content"></div>
+  </main>
+</div>
+
+<div class="tray" id="tray" aria-live="polite"></div>
+<div class="toast" id="toast" role="status"></div>
+
+<div class="scrim" id="scrim">
+  <form class="modal" id="add-form">
+    <h2>Add a video</h2>
+    <p>Paste a YouTube link, or the path of a video file on this computer.</p>
+    <input id="source" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off" required>
+    <div class="error" id="add-error" style="margin: 10px 0 0"></div>
+    <div class="actions">
+      <button class="ghost" type="button" id="add-cancel">Cancel</button>
+      <button class="primary" type="submit">Add video</button>
+    </div>
+  </form>
+</div>
+
+<script type="module">
+// motion.dev for springy progress and transitions; the page still works if the CDN is unreachable.
+let animate = (target, keyframes, options = {}) => {
+  if (typeof target === "number") { options.onUpdate?.(keyframes); return; }
+  const last = (v) => (Array.isArray(v) ? v.at(-1) : v);
+  for (const [key, value] of Object.entries(keyframes)) {
+    if (key === "y") target.style.transform = `translateY(${last(value)}px)`;
+    else if (key === "scaleX") target.style.transform = `scaleX(${last(value)})`;
+    else if (key !== "scale") target.style[key] = last(value);
+  }
+};
+try { ({ animate } = await import("https://cdn.jsdelivr.net/npm/motion@11.11.13/+esm")); } catch { /* CSS fallback above */ }
+
+const $ = (id) => document.getElementById(id);
+const FPS = 30;
+const COLORS = { made: "var(--made)", missed: "var(--miss)" };
+const state = { videos: [], video: null, analyses: [], analysis: null, jobs: new Map(), pendingSource: null, boxes: new Map() };
+const prefs = { get showBoxes() { try { return localStorage.getItem("playlab.showBoxes") === "1"; } catch { return false; } },
+                set showBoxes(on) { try { localStorage.setItem("playlab.showBoxes", on ? "1" : "0"); } catch { /* private mode */ } } };
+
+const hms = (s) => { const t = Math.max(0, Math.round(s)); return [t / 3600 | 0, (t % 3600) / 60 | 0, t % 60].map((n) => String(n).padStart(2, "0")).join(":"); };
+const el = (tag, props = {}, ...kids) => { const n = Object.assign(document.createElement(tag), props); n.append(...kids.filter((k) => k != null)); return n; };
+const api = async (path, options) => {
+  const r = await fetch(path, options && { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(options) });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `Request failed (${r.status})`);
+  return body;
+};
+function toast(text) {
+  const t = $("toast"); t.textContent = text;
+  animate(t, { opacity: [0, 1], y: [-8, 0] }, { duration: .25 });
+  clearTimeout(t.timer); t.timer = setTimeout(() => animate(t, { opacity: 0 }, { duration: .3 }), 2600);
+}
+
+/* ---------- Videos ---------- */
+async function loadVideos(selectId) {
+  state.videos = await api("/api/videos");
+  const pick = state.videos.find((v) => v.id === (selectId || state.video?.id)) || state.videos[0] || null;
+  renderVideos();
+  if (pick && pick.id !== state.video?.id) selectVideo(pick); else if (!pick) render();
+}
+function renderVideos() {
+  $("videos").replaceChildren(...state.videos.map((v) => {
+    const b = el("button", { className: "video-item" + (v.id === state.video?.id ? " active" : ""), type: "button", onclick: () => selectVideo(v) },
+      el("span", { className: "name", textContent: v.name }), el("span", { className: "meta", textContent: v.length }));
+    return b;
+  }));
+}
+async function selectVideo(v) {
+  state.video = v; state.analysis = null;
+  $("title").textContent = v.name; $("start").value = hms(v.start);
+  renderVideos();
+  state.analyses = await api(`/api/analyses?video=${encodeURIComponent(v.id)}`);
+  state.analysis = state.analyses[0] || null;
+  render();
+}
+
+/* ---------- Analyze (runs in the background) ---------- */
+$("analyze").onclick = async () => {
+  $("error").textContent = "";
+  if (!state.video) return showAdd();
+  try {
+    const job = await api("/api/analyze", { video_id: state.video.id, start: $("start").value, length: Number($("length").value) });
+    trackJobs();
+    toast("Analysis started. You can keep using the page.");
+    return job;
+  } catch (e) { $("error").textContent = e.message; }
+};
+$("start").onkeydown = (e) => { if (e.key === "Enter") $("analyze").click(); };
+
+/* ---------- Jobs tray ---------- */
+let polling = null;
+function trackJobs() { if (!polling) { polling = setInterval(pollJobs, 700); pollJobs(); } }
+async function pollJobs() {
+  let rows;
+  try { rows = await api("/api/jobs"); } catch { return; }
+  const live = rows.filter((j) => j.status === "queued" || j.status === "running");
+  for (const job of rows) updateJob(job);
+  if (!live.length && [...state.jobs.values()].every((j) => j.settled)) { clearInterval(polling); polling = null; }
+}
+function updateJob(job) {
+  let entry = state.jobs.get(job.id);
+  const finished = !["queued", "running"].includes(job.status);
+  if (!entry) {
+    if (finished) return;  // ignore jobs that ended before this page started tracking them
+    const bar = el("span"), pct = el("span", { className: "pct", textContent: "0%" }), stage = el("div", { className: "stage" });
+    const node = el("div", { className: "job" }, el("div", { className: "job-top" }, el("span", { textContent: job.title }), pct), stage, el("div", { className: "bar" }, bar));
+    $("tray").append(node);
+    animate(node, { opacity: [0, 1], y: [16, 0], scale: [.98, 1] }, { type: "spring", bounce: .25, duration: .5 });
+    entry = { node, bar, pct, stage, shown: 0 };
+    state.jobs.set(job.id, entry);
+  }
+  if (entry.settled) return;
+  const target = finished && job.status === "done" ? 100 : Math.round((job.progress || 0) * 100);
+  if (target !== entry.shown) {
+    const from = entry.shown; entry.shown = target;
+    animate(entry.bar, { scaleX: target / 100 }, { type: "spring", stiffness: 120, damping: 22 });
+    animate(from, target, { duration: .6, onUpdate: (v) => { entry.pct.textContent = `${Math.round(v)}%`; } });
+  }
+  entry.stage.textContent = job.status === "done" ? (job.kind === "download" ? "Downloaded" : "Ready. Click to open")
+    : job.status === "failed" || job.status === "cancelled" ? (job.error || "Stopped") : job.stage;
+  if (finished) settle(job, entry);
+}
+async function settle(job, entry) {
+  entry.settled = true;
+  entry.node.classList.add(job.status === "done" ? "done" : "failed");
+  if (job.status === "done" && job.kind === "analysis") {
+    const open = async () => {
+      const v = state.videos.find((x) => x.id === job.video_id);
+      if (v && v.id !== state.video?.id) await selectVideo(v);
+      state.analyses = await api(`/api/analyses?video=${encodeURIComponent(job.video_id)}`);
+      state.analysis = state.analyses.find((a) => a.id === job.clip_id) || state.analysis;
+      render();
+    };
+    entry.node.onclick = open;
+    if (job.video_id === state.video?.id) { await open(); toast(`Analysis ready · ${job.title}`); }
+    else toast("Analysis ready. Click it to open.");
+  }
+  if (job.status === "done" && job.kind === "download") { await loadVideos(); const v = state.videos.find((x) => x.youtube === state.pendingSource); if (v) selectVideo(v); toast("Video added"); }
+  setTimeout(() => {
+    const fade = animate(entry.node, { opacity: 0, y: 12 }, { duration: .35 });
+    if (fade?.then) fade.then(() => entry.node.remove()); else entry.node.remove();
+  }, job.status === "done" ? 6000 : 15000);
+}
+
+/* ---------- Main content ---------- */
+function render() {
+  const content = $("content");
+  if (!state.video) {
+    content.replaceChildren(el("div", { className: "card hero" }, el("h2", { textContent: "Add a game to get started" }),
+      el("p", { textContent: "Paste a YouTube link or open a video file." }), el("button", { className: "primary", type: "button", textContent: "Add video", onclick: showAdd })));
+    return;
+  }
+  const a = state.analysis;
+  const total = a ? a.shots.length : 0;
+  const pct = (n) => (total ? `${Math.round(100 * n / total)}%` : "0%");
+  const stat = (label, value, badge, lead) => el("div", { className: "stat" + (lead ? " lead" : "") },
+    el("div", { className: "label" }, label), el("div", { className: "value", textContent: value }), badge);
+  const overview = el("section", { className: "card" },
+    el("div", { className: "card-head" }, el("h2", { textContent: "Overview" }), el("span", { className: "chip", textContent: a ? a.range : "No clip analyzed yet" })),
+    el("div", { className: "stats" },
+      stat("Shots", total, el("div", { className: "sub", textContent: a && a.unclear ? `${a.unclear} unclear` : "in this clip" }), true),
+      stat("Made", a ? a.made : 0, el("span", { className: "badge made", textContent: pct(a?.made || 0) })),
+      stat("Missed", a ? a.missed : 0, el("span", { className: "badge missed", textContent: pct(a?.missed || 0) }))));
+
+  const left = el("div", { className: "col" }, overview, a ? playerCard(a) :
+    el("section", { className: "card hero" }, el("h2", { textContent: "Analyze a clip" }),
+      el("p", { textContent: "Set a start time and length above, then press Analyze. It runs in the background." })));
+
+  const shots = el("section", { className: "card" }, el("div", { className: "card-head" }, el("h2", { textContent: "Shots" })),
+    a && a.shots.length ? el("div", { className: "list" }, ...a.shots.map((s) => el("button", { className: "row", type: "button", onclick: () => seek(s.at) },
+      el("span", { className: "dot", style: `--c:${COLORS[s.result] || "var(--unclear)"}` }), el("span", { className: "time", textContent: s.time }),
+      el("span", { className: `badge ${s.result in COLORS ? s.result : "unclear"}`, textContent: s.result in COLORS ? s.result[0].toUpperCase() + s.result.slice(1) : "Unclear" }))))
+      : el("div", { className: "empty", textContent: a ? "No shots found in this clip." : "Shots appear here." }));
+
+  const history = el("section", { className: "card" }, el("div", { className: "card-head" }, el("h2", { textContent: "Analyzed clips" })),
+    state.analyses.length ? el("div", { className: "list scroll" }, ...state.analyses.map((x) => el("button", { className: "row" + (x.id === a?.id ? " active" : ""), type: "button",
+      onclick: () => { state.analysis = x; render(); } },
+      el("div", { className: "grow" }, el("div", { className: "title", textContent: x.range }),
+        el("div", { className: "sub", textContent: `${x.made} made · ${x.missed} missed` })))))
+      : el("div", { className: "empty", textContent: "Nothing analyzed for this video yet." }));
+
+  content.replaceChildren(el("div", { className: "grid" }, left, el("div", { className: "col" }, shots, history)));
+  animate(content.firstChild, { opacity: [0, 1], y: [6, 0] }, { duration: .25 });
+}
+
+/* ---------- Frame-scrubbable player ---------- */
+let video = null, frameRequest = null;
+function playerCard(a) {
+  video = el("video", { src: a.playback, preload: "auto", playsInline: true, muted: true });
+  const fill = el("div", { className: "fill" }), knob = el("div", { className: "knob" }), track = el("div", { className: "track" });
+  const scrub = el("div", { className: "scrub", role: "slider", tabIndex: 0, ariaLabel: "Clip position" }, track, fill, knob);
+  const length = a.end - a.start;
+  for (const s of a.shots) {
+    scrub.append(el("button", { className: "marker", type: "button", title: `${s.time} · ${s.result}`, style: `left:${100 * s.at / length}%;--c:${COLORS[s.result] || "var(--unclear)"}`,
+      onclick: (e) => { e.stopPropagation(); seek(s.at); } }));
+  }
+  const clock = el("div", { className: "clock" });
+  const playIcon = '<svg viewBox="0 0 16 16" fill="#1b1b1d"><path d="M4 2.5v11l9-5.5z"/></svg>';
+  const pauseIcon = '<svg viewBox="0 0 16 16" fill="#1b1b1d"><path d="M3.5 2h3v12h-3zM9.5 2h3v12h-3z"/></svg>';
+  const play = el("button", { className: "round", type: "button", ariaLabel: "Play or pause", innerHTML: playIcon, onclick: () => (video.paused ? video.play() : video.pause()) });
+  const back = el("button", { className: "round", type: "button", ariaLabel: "Previous frame", innerHTML: '<svg viewBox="0 0 16 16" fill="none" stroke="#1b1b1d" stroke-width="1.8"><path d="M10 3 5 8l5 5"/></svg>', onclick: () => step(-1) });
+  const next = el("button", { className: "round", type: "button", ariaLabel: "Next frame", innerHTML: '<svg viewBox="0 0 16 16" fill="none" stroke="#1b1b1d" stroke-width="1.8"><path d="m6 3 5 5-5 5"/></svg>', onclick: () => step(1) });
+
+  const canvas = el("canvas");
+  const showBoxes = el("input", { type: "checkbox", checked: prefs.showBoxes, ariaLabel: "Show bounding boxes" });
+  const loadBoxes = async () => {
+    if (!state.boxes.has(a.id)) {
+      try { state.boxes.set(a.id, await api(`/api/analyses/${a.id}/boxes`)); } catch { state.boxes.set(a.id, { step: .2, frames: [] }); }
+    }
+    paint();
+  };
+  showBoxes.onchange = () => { prefs.showBoxes = showBoxes.checked; showBoxes.checked ? loadBoxes() : paint(); };
+  if (showBoxes.checked) setTimeout(loadBoxes);  // after paint() below is defined
+
+  const drawBoxes = (t) => {
+    const rect = canvas.getBoundingClientRect(), ratio = window.devicePixelRatio || 1;
+    if (canvas.width !== Math.round(rect.width * ratio)) { canvas.width = Math.round(rect.width * ratio); canvas.height = Math.round(rect.height * ratio); }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0); ctx.clearRect(0, 0, rect.width, rect.height);
+    const data = state.boxes.get(a.id);
+    if (!showBoxes.checked || !data || !video.videoWidth) return;
+    let near = null;  // the scan sampled every `step` seconds: show the closest sample
+    for (const f of data.frames) if (!near || Math.abs(f.t - t) < Math.abs(near.t - t)) near = f;
+    if (!near || Math.abs(near.t - t) > data.step / 2 + .02) return;
+    const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);  // object-fit: contain
+    const w = video.videoWidth * scale, h = video.videoHeight * scale, ox = (rect.width - w) / 2, oy = (rect.height - h) / 2;
+    const draw = ([x1, y1, x2, y2, conf], color, label, width = 2) => {
+      const x = ox + x1 * w, y = oy + y1 * h;
+      ctx.globalAlpha = Math.max(.35, Math.min(1, conf * 1.4));
+      ctx.strokeStyle = color; ctx.lineWidth = width; ctx.strokeRect(x, y, (x2 - x1) * w, (y2 - y1) * h);
+      ctx.font = "600 11px Inter, system-ui, sans-serif";
+      const text = `${label} ${Math.round(conf * 100)}%`, tw = ctx.measureText(text).width;
+      ctx.fillStyle = color; ctx.fillRect(x, Math.max(0, y - 16), tw + 8, 15);
+      ctx.fillStyle = "#111"; ctx.fillText(text, x + 4, Math.max(11, y - 5));
+    };
+    for (const r of near.rims) draw(r, "#38c6e8", "rim");
+    if (near.rim) draw(near.rim, "#38c6e8", "rim used", 3.5);
+    for (const b of near.balls) draw(b, "#f5a623", "ball");
+    ctx.globalAlpha = 1;
+  };
+
+  const paint = () => {
+    const t = video.currentTime || 0, f = Math.min(1, t / (video.duration || length));
+    fill.style.width = `${f * 100}%`; knob.style.left = `${f * 100}%`;
+    clock.replaceChildren(hms(a.start + t), el("small", { textContent: `frame ${Math.floor((t % 1) * FPS) + 1}/${FPS}` }));
+    drawBoxes(t);
+  };
+  new ResizeObserver(() => paint()).observe(canvas);
+  const loop = () => { paint(); frameRequest = video.paused ? null : requestAnimationFrame(loop); };
+  video.onplay = () => { play.innerHTML = pauseIcon; cancelAnimationFrame(frameRequest); loop(); };
+  video.onpause = () => { play.innerHTML = playIcon; paint(); };
+  video.onseeked = video.onloadedmetadata = paint;
+  const at = (e) => { const r = scrub.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * (video.duration || length); };
+  scrub.onpointerdown = (e) => { scrub.setPointerCapture(e.pointerId); video.pause(); video.currentTime = at(e); paint(); };
+  scrub.onpointermove = (e) => { if (scrub.hasPointerCapture(e.pointerId)) { video.currentTime = at(e); paint(); } };
+  scrub.onkeydown = (e) => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); step((e.key === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? FPS : 1)); } };
+  setTimeout(paint);
+  return el("section", { className: "card" }, el("div", { className: "card-head" }, el("h2", { textContent: "Clip" }),
+      el("div", { className: "head-right" }, el("label", { className: "toggle" }, showBoxes, "Show boxes"), el("span", { className: "chip", textContent: a.range }))),
+    el("div", { className: "player" }, video, canvas), scrub, el("div", { className: "controls" }, back, play, next, clock),
+    el("div", { className: "hint", textContent: "Drag the bar to scrub. ← → step one frame, Shift moves one second, Space plays." }));
+}
+function step(frames) { if (!video) return; video.pause(); video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + frames / FPS)); }
+function seek(t) { if (!video) return; video.pause(); video.currentTime = Math.max(0, t); video.scrollIntoView?.({ behavior: "smooth", block: "center" }); }
+document.addEventListener("keydown", (e) => {
+  if (!video || e.target.closest("input, select, textarea, .modal")) return;
+  if (e.code === "Space") { e.preventDefault(); video.paused ? video.play() : video.pause(); }
+  else if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); step((e.key === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? FPS : 1)); }
+});
+
+/* ---------- Add video ---------- */
+function showAdd() { $("scrim").style.display = "grid"; $("add-error").textContent = ""; animate($("add-form"), { opacity: [0, 1], scale: [.96, 1] }, { type: "spring", bounce: .2, duration: .35 }); setTimeout(() => $("source").focus()); }
+const hideAdd = () => { $("scrim").style.display = "none"; };
+$("add-video").onclick = showAdd; $("add-cancel").onclick = hideAdd;
+$("scrim").onclick = (e) => { if (e.target === $("scrim")) hideAdd(); };
+$("add-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const source = $("source").value.trim();
+  try {
+    const r = await api("/api/videos", { source });
+    hideAdd(); $("source").value = "";
+    if (r.video) { await loadVideos(r.video.id); toast("Video added"); }
+    else { state.pendingSource = source; trackJobs(); toast("Downloading in the background…"); }
+  } catch (err) { $("add-error").textContent = err.message; }
+};
+
+await loadVideos();
+trackJobs();
+</script>
+</body>
+</html>
