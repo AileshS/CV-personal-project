@@ -13,7 +13,7 @@ dependencies = [
 vision = ["ultralytics>=8.3,<9", "torch>=2.6,<3", "torchvision>=0.21,<1", "lap>=0.5.12,<0.6"]
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "ruff>=0.11"]
+dev = ["pytest>=8,<10", "ruff>=0.11", "httpx2>=0.1"]  # httpx2: starlette.testclient for tests/test_web.py
 
 [project.scripts]
 playlab = "playlab.cli:main"
