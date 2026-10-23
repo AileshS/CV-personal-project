@@ -60,7 +60,9 @@ def compute_features(observations: list[dict], max_observation_gap: float = 0.35
     bounced = _bounced_out(points)
     result["descent_abs_x"] = descent
     result["bounced_out"] = float(bounced)
-    result["min_rim_distance"] = min(math.hypot(x, y) for _, x, y in points)
+    closest = min(points, key=lambda p: math.hypot(p[1], p[2]))
+    result["min_rim_distance"] = math.hypot(closest[1], closest[2])
+    result["rim_time"] = closest[0]  # when the ball came closest; one rim visit is one shot
     made_cross = bool(crossings) and min(crossings) <= 0.4
     falls_inside = descent is not None and descent <= 0.4
     falls_outside = descent is not None and descent >= 0.6

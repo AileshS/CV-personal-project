@@ -4,6 +4,7 @@ import pytest
 
 from playlab import analysis
 from playlab.detectors import nearest_defender, team_for_player
+from playlab.features import compute_features
 from playlab.store import Store
 
 
@@ -440,3 +441,21 @@ def test_two_candidates_near_the_prior_stay_ambiguous_and_far_jumps_are_rejected
     assert analysis._ball_observation({"balls": [_ball(42, 50, .15), _ball(140, 20, .95)]},
                                       None, .2, last, 160) == (None, last)
     assert analysis._chosen_ball(last, .2) is None
+
+
+def test_overlapping_rim_boxes_are_one_basket_but_two_apart_stay_ambiguous():
+    # Rim-with-net, rim-only and a partial box for one basket, as the fine-tuned model returns them.
+    with_net = {"bbox": [81., 196., 120., 234.], "confidence": .46}
+    rim_only = {"bbox": [79., 195., 121., 212.], "confidence": .25}
+    partial = {"bbox": [70., 180., 100., 200.], "confidence": .2}
+    assert analysis._rim({"rims": [rim_only, with_net, partial]}, {}, 1280, 720) is with_net
+    # Two separate baskets with no ball to choose between them: no rim evidence.
+    far = {"bbox": [1100., 200., 1140., 240.], "confidence": .5}
+    assert analysis._rim({"rims": [with_net, far]}, {}, 1280, 720) is None
+
+
+def test_rim_time_is_when_the_ball_came_closest_to_the_rim():
+    rows = [{"time": t, "x": x, "y": 0., "rim_x": 0., "rim_y": 0., "rim_width": 1.}
+            for t, x in ((0., 3.), (.1, 1.), (.2, .2), (.3, 1.5))]
+    features = compute_features(rows)
+    assert features["rim_time"] == .2 and features["min_rim_distance"] == pytest.approx(.2)
