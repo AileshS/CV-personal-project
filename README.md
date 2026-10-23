@@ -5,14 +5,15 @@ possessions, analyzes selected possessions for made/missed shots, and suggests
 the closest visible opposing player at release using approximate image distance.
 Foul and turnover labels are manual. Predictions remain review-required.
 
-The site (`app.py`) is **Quick analysis** only: open a video, pick up to 60 seconds,
-select **Analyze**, and read each shot attempt (made/missed, release frame, closest
-opponent) with its evidence. Short clips run in the viewer; no labeling, possession
-cutting or basket setup is required. See [the Quick analysis guide](docs/QUICK_ANALYSIS.md).
+The website (`playlab web`, then open http://localhost:8600) is the shot dashboard:
+pick a video (or add one from YouTube), set a start time and length, press **Analyze**,
+and keep working while it runs in the background. Each analyzed clip shows the number
+of shots made and missed, a frame-scrubbable timeline with a marker per shot, and every
+shot's time in hh:mm:ss.
 
-Everything else lives in `labeling_app.py`, including **Tracking video** (a
-10-second clip with ball/rim boxes, see [the tracking-video guide](docs/TRACKED_VIDEO.md))
-and the labeling and review workspaces. Made/missed is checked only on a small set
+The earlier Streamlit page (`app.py`) and the labeling tools (`labeling_app.py`,
+including **Tracking video**, see [the tracking-video guide](docs/TRACKED_VIDEO.md))
+are still available. Made/missed is checked only on a small set
 of hand-labeled shots so far; treat results as review-required.
 
 For the review-batch workspace and safe local integration steps, read
@@ -26,8 +27,10 @@ Python 3.12 and [uv](https://docs.astral.sh/uv/) are required.
 
 ```sh
 uv sync --locked --extra vision
-uv run --extra vision streamlit run app.py
+uv run --extra vision playlab web
 ```
+
+Then open http://localhost:8600.
 
 The tracking screen starts its worker when you select Analyze. For the advanced
 workspaces, a worker can also be started manually in a second terminal:

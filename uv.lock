@@ -58,7 +58,9 @@ dependencies = [
     { name = "pandas" },
     { name = "pillow" },
     { name = "scikit-learn" },
+    { name = "starlette" },
     { name = "streamlit" },
+    { name = "uvicorn" },
     { name = "yt-dlp" },
     { name = "yt-dlp-ejs" },
 ]
@@ -87,10 +89,12 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.2,<4" },
     { name = "pillow", specifier = ">=11,<13" },
     { name = "scikit-learn", specifier = ">=1.6,<2" },
+    { name = "starlette", specifier = ">=0.47" },
     { name = "streamlit", specifier = ">=1.57,<2" },
     { name = "torch", marker = "extra == 'vision'", specifier = ">=2.6,<3" },
     { name = "torchvision", marker = "extra == 'vision'", specifier = ">=0.21,<1" },
     { name = "ultralytics", marker = "extra == 'vision'", specifier = ">=8.3,<9" },
+    { name = "uvicorn", specifier = ">=0.30" },
     { name = "yt-dlp", specifier = ">=2026.1" },
     { name = "yt-dlp-ejs", specifier = ">=0.3" },
 ]

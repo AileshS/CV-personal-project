@@ -19,7 +19,7 @@ validation evidence. Never tune against locked test results.
 - Install: `uv sync --locked` (CPU viewer/tests). Optional model runtime:
   `uv sync --locked --extra vision`.
 - Check: `uv run pytest -q` and `uv run ruff check .`.
-- Viewer: `uv run --extra vision streamlit run app.py` (Quick analysis only). Labeling/review: `uv run --extra vision streamlit run labeling_app.py`.
+- Website: `uv run --extra vision playlab web` (http://localhost:8600). Old Streamlit page: `streamlit run app.py`. Labeling/review: `uv run --extra vision streamlit run labeling_app.py`.
 - Worker: `uv run playlab worker` (separate process).
 - Inspect work needing a person: `uv run playlab attention`.
 

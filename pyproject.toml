@@ -5,7 +5,7 @@ description = "A reviewable basketball possession and shot-analysis training lab
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "numpy>=2,<3", "pillow>=11,<13", "opencv-python>=4.10,<5",
-  "streamlit>=1.57,<2", "pandas>=2.2,<4", "scikit-learn>=1.6,<2",
+  "streamlit>=1.57,<2", "starlette>=0.47", "uvicorn>=0.30", "pandas>=2.2,<4", "scikit-learn>=1.6,<2",
   "imageio-ffmpeg>=0.6,<0.7", "yt-dlp>=2026.1", "yt-dlp-ejs>=0.3", "joblib>=1.4,<2",
 ]
 
