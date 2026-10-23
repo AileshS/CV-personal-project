@@ -45,6 +45,8 @@ def parser():
     worker.add_argument("--recover", action="store_true", help="Only after stopping the previous worker")
     web = sub.add_parser("web", help="Run the shot-analysis website (http://localhost:8600)")
     web.add_argument("--port", type=int, default=8600)
+    web.add_argument("--host", default=os.environ.get("PLAYLAB_HOST", "127.0.0.1"),
+                     help="0.0.0.0 opens it to your phone; needs PLAYLAB_PASSCODE")
     sub.add_parser("status")
     resume = sub.add_parser("resume")
     resume.add_argument("job_id")
@@ -132,7 +134,7 @@ def execute(args):
         return analyze_possession(store, **payload)
     if command == "web":
         from playlab.web import serve
-        serve(args.data, port=args.port)
+        serve(args.data, port=args.port, host=args.host, passcode=os.environ.get("PLAYLAB_PASSCODE") or None)
         return {"status": "website stopped"}
     if command == "worker":
         from playlab.worker import recover_worker, run_worker

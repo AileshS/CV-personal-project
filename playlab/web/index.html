@@ -108,6 +108,23 @@
   .row .grow { flex: 1; min-width: 0; }
   .row .title { font-weight: 500; font-variant-numeric: tabular-nums; }
   .empty { color: var(--muted); padding: 18px 4px; text-align: center; }
+  .row .team { color: var(--muted); font-size: 12px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Teams */
+  .teams-line { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 14px; color: var(--muted); font-size: 13px; }
+  .teams-line b { color: var(--ink); font-weight: 600; }
+  .team-form { display: flex; flex-direction: column; gap: 12px; }
+  .team-form label { color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .team-form input { width: 100%; min-width: 0; height: 40px; border-radius: 12px; border: 1px solid var(--line); padding: 0 12px; outline: 0; background: var(--soft);
+                     font-variant-numeric: tabular-nums; }
+  .team-form input:focus { border-color: #c9c9cf; background: #fff; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: var(--soft); border-radius: 12px; padding: 4px; }
+  .seg button { border: 0; background: none; border-radius: 9px; padding: 8px; font-weight: 500; color: var(--muted);
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .seg button.on { background: var(--card); color: var(--ink); box-shadow: var(--shadow); }
+  .team-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .side { background: var(--soft); border-radius: 14px; padding: 12px; min-width: 0; }
+  .side .sub { margin: 0 0 2px; } .side b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .small { height: 34px; padding: 0 14px; font-size: 13px; }
   .hero { display: grid; place-items: center; text-align: center; padding: 70px 24px; gap: 10px; }
   .hero h2 { font-size: 22px; }
   .hero p { color: var(--muted); margin: 0 0 8px; }
@@ -238,7 +255,7 @@ function renderVideos() {
   }));
 }
 async function selectVideo(v) {
-  state.video = v; state.analysis = null;
+  state.video = v; state.analysis = null; editingTeams = false;
   $("title").textContent = v.name; $("start").value = hms(v.start);
   renderVideos();
   state.analyses = await api(`/api/analyses?video=${encodeURIComponent(v.id)}`);
@@ -288,7 +305,7 @@ function updateJob(job) {
     animate(entry.bar, { scaleX: target / 100 }, { type: "spring", stiffness: 120, damping: 22 });
     animate(from, target, { duration: .6, onUpdate: (v) => { entry.pct.textContent = `${Math.round(v)}%`; } });
   }
-  entry.stage.textContent = job.status === "done" ? (job.kind === "download" ? "Downloaded" : "Ready. Click to open")
+  entry.stage.textContent = job.status === "done" ? ({ download: "Downloaded", periods: "Done" }[job.kind] || "Ready. Click to open")
     : job.status === "failed" || job.status === "cancelled" ? (job.error || "Stopped") : job.stage;
   if (finished) settle(job, entry);
 }
@@ -299,6 +316,8 @@ async function settle(job, entry) {
     const open = async () => {
       const v = state.videos.find((x) => x.id === job.video_id);
       if (v && v.id !== state.video?.id) await selectVideo(v);
+      state.videos = await api("/api/videos");  // each new clip adds votes to the video's teams
+      state.video = state.videos.find((x) => x.id === job.video_id) || state.video;
       state.analyses = await api(`/api/analyses?video=${encodeURIComponent(job.video_id)}`);
       state.analysis = state.analyses.find((a) => a.id === job.clip_id) || state.analysis;
       render();
@@ -306,6 +325,13 @@ async function settle(job, entry) {
     entry.node.onclick = open;
     if (job.video_id === state.video?.id) { await open(); toast(`Analysis ready · ${job.title}`); }
     else toast("Analysis ready. Click it to open.");
+  }
+  if (job.status === "done" && job.kind === "periods" && job.video_id === state.video?.id) {
+    await loadVideos();
+    state.video = state.videos.find((x) => x.id === job.video_id) || state.video;
+    state.analyses = await api(`/api/analyses?video=${encodeURIComponent(job.video_id)}`);
+    state.analysis = state.analyses.find((x) => x.id === state.analysis?.id) || state.analyses[0] || null;
+    render();
   }
   if (job.status === "done" && job.kind === "download") { await loadVideos(); const v = state.videos.find((x) => x.youtube === state.pendingSource); if (v) selectVideo(v); toast("Video added"); }
   setTimeout(() => {
@@ -332,7 +358,9 @@ function render() {
     el("div", { className: "stats" },
       stat("Shots", total, el("div", { className: "sub", textContent: a && a.unclear ? `${a.unclear} unclear` : "in this clip" }), true),
       stat("Made", a ? a.made : 0, el("span", { className: "badge made", textContent: pct(a?.made || 0) })),
-      stat("Missed", a ? a.missed : 0, el("span", { className: "badge missed", textContent: pct(a?.missed || 0) }))));
+      stat("Missed", a ? a.missed : 0, el("span", { className: "badge missed", textContent: pct(a?.missed || 0) }))),
+    a && Object.keys(a.by_team || {}).length ? el("div", { className: "teams-line" }, ...Object.entries(a.by_team).map(([team, n]) =>
+      el("span", {}, el("b", { textContent: team }), ` ${n.made} made · ${n.missed} missed`))) : null);
 
   const left = el("div", { className: "col" }, overview, a ? playerCard(a) :
     el("section", { className: "card hero" }, el("h2", { textContent: "Analyze a clip" }),
@@ -341,6 +369,8 @@ function render() {
   const shots = el("section", { className: "card" }, el("div", { className: "card-head" }, el("h2", { textContent: "Shots" })),
     a && a.shots.length ? el("div", { className: "list" }, ...a.shots.map((s) => el("button", { className: "row", type: "button", onclick: () => seek(s.at) },
       el("span", { className: "dot", style: `--c:${COLORS[s.result] || "var(--unclear)"}` }), el("span", { className: "time", textContent: s.time }),
+      el("span", { className: "team", textContent: s.team || (s.basket ? `${s.basket === "left" ? "Left" : "Right"} basket` : ""),
+        title: s.team ? `${s.team} · ${s.basket || "unknown"} basket` : "Team not worked out yet" }),
       el("span", { className: `badge ${s.result in COLORS ? s.result : "unclear"}`, textContent: s.result in COLORS ? s.result[0].toUpperCase() + s.result.slice(1) : "Unclear" }))))
       : el("div", { className: "empty", textContent: a ? "No shots found in this clip." : "Shots appear here." }));
 
@@ -351,8 +381,53 @@ function render() {
         el("div", { className: "sub", textContent: `${x.made} made · ${x.missed} missed` })))))
       : el("div", { className: "empty", textContent: "Nothing analyzed for this video yet." }));
 
-  content.replaceChildren(el("div", { className: "grid" }, left, el("div", { className: "col" }, shots, history)));
+  content.replaceChildren(el("div", { className: "grid" }, left, el("div", { className: "col" }, teamsCard(), shots, history)));
   animate(content.firstChild, { opacity: [0, 1], y: [6, 0] }, { duration: .25 });
+}
+
+/* ---------- Teams: worked out automatically ---------- */
+// Halftime comes from the scoreboard's period digit; shooters' jerseys vote for which shade
+// attacks which basket. Naming the two shades is optional.
+let editingTeams = false;
+function teamsCard() {
+  const t = state.video.teams;
+  const card = el("section", { className: "card" });
+  const head = el("div", { className: "card-head" }, el("h2", { textContent: "Teams" }),
+    editingTeams ? null : el("button", { className: "ghost small", type: "button", textContent: "Rename", onclick: () => { editingTeams = true; render(); } }));
+  card.append(head);
+  if (editingTeams) {
+    const inputs = ["light", "dark"].map((shade) => el("input", { value: t.names[shade], ariaLabel: `${shade} jerseys` }));
+    const error = el("div", { className: "error" });
+    const save = el("button", { className: "primary small", type: "button", textContent: "Save" });
+    save.onclick = async () => {
+      try {
+        const { video: v } = await api(`/api/videos/${encodeURIComponent(state.video.id)}/teams`, { light: inputs[0].value, dark: inputs[1].value });
+        Object.assign(state.video, v); editingTeams = false;
+        state.analyses = await api(`/api/analyses?video=${encodeURIComponent(v.id)}`);
+        state.analysis = state.analyses.find((x) => x.id === state.analysis?.id) || state.analyses[0] || null;
+        render(); toast("Team names saved");
+      } catch (e) { error.textContent = e.message; }
+    };
+    card.append(el("div", { className: "team-form" },
+      el("div", { className: "team-sides" }, el("label", {}, "Light jerseys", inputs[0]), el("label", {}, "Dark jerseys", inputs[1])),
+      error, el("div", { className: "head-right" }, save,
+        el("button", { className: "ghost small", type: "button", textContent: "Cancel", onclick: () => { editingTeams = false; render(); } }))));
+    return card;
+  }
+  if (t.left_first) {
+    const other = t.left_first === "light" ? "dark" : "light";
+    const side = (label, shade) => el("div", { className: "side" }, el("div", { className: "sub", textContent: label }), el("b", { textContent: t.names[shade] }));
+    card.append(el("div", { className: "sub", textContent: "1st half" }),
+      el("div", { className: "team-sides" }, side("◀ Left basket", t.left_first), side("Right basket ▶", other)),
+      el("div", { className: "sub", textContent: `They switch at halftime, ${t.halftime} (read from the scoreboard). Based on ${t.votes} of ${t.votes + t.against} shooters seen.` }));
+    return card;
+  }
+  const why = t.halftime_status === "reading" ? "Finding halftime on the scoreboard. Shots are labeled by the shooter's jersey until then."
+    : t.halftime_status === "unreadable" ? "The scoreboard's period couldn't be read, so each shot is labeled by its own shooter's jersey when it can be seen."
+    : t.shooters ? "Not enough shooters seen yet to tell which team attacks which basket. Analyze more clips."
+    : "Teams are worked out from who takes the shots. Analyze a clip with shots in it.";
+  card.append(el("div", { className: "sub", textContent: why }));
+  return card;
 }
 
 /* ---------- Frame-scrubbable player ---------- */
