@@ -134,8 +134,20 @@ def _center(box):
     return (x1 + x2) / 2, (y1 + y2) / 2
 
 
+def _distinct_rims(rims):
+    """One box per basket, the strongest. The detector often returns rim-with-net, rim-only and
+    partial boxes for one basket; two different baskets never overlap in the image."""
+    kept = []
+    for rim in sorted(rims, key=lambda r: r["confidence"], reverse=True):
+        x1, y1, x2, y2 = rim["bbox"]
+        if not any(min(x2, o["bbox"][2]) > max(x1, o["bbox"][0]) and min(y2, o["bbox"][3]) > max(y1, o["bbox"][1])
+                   for o in kept):
+            kept.append(rim)
+    return kept
+
+
 def _rim(detections, setup, width, height):
-    rims = detections.get("rims", [])
+    rims = _distinct_rims(detections.get("rims", []))
     if len(rims) == 1:
         return rims[0]
     if len(rims) > 1:
@@ -307,6 +319,9 @@ def _chosen_ball(last_ball, at):
     if not last_ball or last_ball["time"] != float(at):
         return None
     return {"bbox": last_ball["bbox"], "confidence": last_ball["confidence"]}
+
+
+SAME_RIM_VISIT = 1.0  # seconds; two proposals whose ball was closest to the rim this close are one shot
 
 
 def _rim_distance(point):
@@ -639,6 +654,10 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                     for key, value in features.items()}
         if candidate["origin"] == "automatic_rim_approach" and not _reached_rim(features):
             continue  # the dense re-check never saw the ball reach the rim: not a shot
+        if candidate["origin"] == "automatic_rim_approach" and features.get("rim_time") is not None and any(
+                e["features"].get("rim_time") is not None
+                and abs(e["features"]["rim_time"] - features["rim_time"]) <= SAME_RIM_VISIT for e in events):
+            continue  # an earlier proposal already covers this trip to the rim
         baseline = geometry_prediction(features)
         prediction = predict_result(model_bundle, features) if model_bundle else {
             "result": baseline, "score": None, "method": "provisional_geometry"}
