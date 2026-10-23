@@ -32,6 +32,32 @@ uv run --extra vision playlab web
 
 Then open http://localhost:8600.
 
+### Use it on your phone
+
+The website runs on this computer, so the computer must be on, awake and running
+`playlab web`. (A public host like Vercel cannot run it: analysis needs the
+models and the videos stored here.)
+
+- **Anywhere, with [Tailscale](https://tailscale.com)** (recommended; signed in on
+  the computer and the phone). Keep the default `playlab web`, then once:
+
+  ```sh
+  tailscale serve --bg --https=8443 8600
+  ```
+
+  Open `https://<computer-name>.<tailnet>.ts.net:8443` on the phone. Only devices
+  in your Tailscale account can open it, and port 8443 leaves other sites shared
+  on the default HTTPS address alone. Stop sharing with `tailscale serve --https=8443 off`.
+- **Same Wi-Fi, no Tailscale.** Open the site to the network with a passcode:
+
+  ```powershell
+  $env:PLAYLAB_PASSCODE="pick-something"; uv run --extra vision playlab web --host 0.0.0.0
+  ```
+
+  Open the `Same Wi-Fi: http://…:8600` address it prints and enter the passcode
+  once. Windows may ask to allow Python through the firewall on private networks.
+  The site refuses to listen beyond this computer without `PLAYLAB_PASSCODE`.
+
 The tracking screen starts its worker when you select Analyze. For the advanced
 workspaces, a worker can also be started manually in a second terminal:
 

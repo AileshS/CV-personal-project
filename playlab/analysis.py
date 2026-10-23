@@ -310,7 +310,7 @@ def _ball_observation(detections, rim, at, last_ball, width):
     rx, ry = _center(rim)
     return ({"time": float(at), "x": float(x), "y": float(y), "rim_x": rx, "rim_y": ry,
              "rim_width": rim["bbox"][2] - rim["bbox"][0], "rim_height": rim["bbox"][3] - rim["bbox"][1],
-             "confidence": float(ball["confidence"])},
+             "frame_width": float(width), "confidence": float(ball["confidence"])},
             current)
 
 
@@ -322,6 +322,38 @@ def _chosen_ball(last_ball, at):
 
 
 SAME_RIM_VISIT = 1.0  # seconds; two proposals whose ball was closest to the rim this close are one shot
+
+
+def basket_side(observations, at=None):
+    """'left' or 'right': which end of the court the rim is at, from where it sits in the frame.
+
+    The camera pans from mid-court, so the left basket stays in the left part of the frame
+    and the right basket in the right part (rims were never seen in the middle fifth).
+    Uses the observations nearest `at` (when the ball reached the rim), else all of them.
+    """
+    rows = [p for p in observations if p.get("frame_width") and p.get("rim_width", 0) > 0]
+    if at is not None:
+        rows = sorted(rows, key=lambda p: abs(p["time"] - at))[:5]
+    if not rows:
+        return None
+    position = float(np.median([p["rim_x"] / p["frame_width"] for p in rows]))
+    return "left" if position < .5 else "right"
+
+
+def release_point(observations, rim_time, lookback=2.5, max_gap=.4, wobble=.5):
+    """Where the ball left the shooter: trace the flight back from the rim while it keeps getting
+    farther from the rim (scan and rim-crop positions differ slightly, so a dip of up to `wobble`
+    rim widths is allowed). Returns the earliest such observation, or None for a flight under 0.3 s."""
+    points = sorted((p for p in observations if p.get("rim_width", 0) > 0 and rim_time - lookback <= p["time"] <= rim_time),
+                    key=lambda p: p["time"])
+    if not points:
+        return None
+    current, farthest = points[-1], _rim_distance(points[-1])
+    for point in reversed(points[:-1]):
+        if current["time"] - point["time"] > max_gap or _rim_distance(point) < farthest - wobble:
+            break
+        current, farthest = point, max(farthest, _rim_distance(point))
+    return current if current["time"] <= rim_time - .3 else None
 
 
 def _rim_distance(point):
@@ -590,6 +622,26 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                 report((at - window_start) / (window_end - window_start))
         return rows
 
+    def shooter_jersey(features, selected):
+        """Jersey lightness (CIELAB L, 0-255) of the player holding the ball where its flight to the
+        rim began, of everyone visible then (for the game's light/dark split), and that time."""
+        if features.get("rim_time") is None or "color_candidates_manual_rim" in modes:
+            return None, [], None
+        point = release_point(observations + selected, features["rim_time"])
+        if not point:
+            return None, [], None
+        nonlocal inferred_frames
+        frame = frame_at(game["source_path"], point["time"], max_width=1280)
+        people = [{**person, "track_id": str(i)} for i, person in enumerate(_people(ensure_detector(), frame))]
+        inferred_frames += 1
+        lightness = {}
+        for person in people:
+            lab = torso_color(frame, person["bbox"])
+            if lab:
+                lightness[person["track_id"]] = round(lab[0], 1)
+        shooter = _shooter(people, [point], point["time"])
+        return lightness.get(shooter), sorted(lightness.values()), point["time"]
+
     def release_players(release, tag):
         """People at the release frame and +-0.4 s (extra samples for team colors); untracked."""
         if "color_candidates_manual_rim" in modes:
@@ -681,7 +733,11 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                              shooter, defender, image_path,
                              **({"source_offset_seconds": game["source_offset_seconds"]}
                                 if game.get("source_offset_seconds") else {}))
+        lightness, visible, traced_release = shooter_jersey(features, selected)
         events.append({**candidate, "type": "shot", "time": release, "release": release,
+                       "basket": basket_side(selected, features.get("rim_time")),
+                       "shooter_lightness": lightness, "players_lightness": visible,
+                       "traced_release": traced_release,
                        "game_id": game["id"], "possession_id": possession_id,
                        "release_confirmed": candidate["origin"] == "human_release_anchor",
                        "result": prediction["result"], "predicted_result": prediction["result"],
