@@ -135,7 +135,8 @@ def _boxes(store: Store, clip: dict) -> dict:
             frames.append({"t": round(float(frame["time"]) - float(clip["start"]), 3),
                            "balls": [norm(b, width, height) for b in raw.get("balls", [])],
                            "rims": [norm(r, width, height) for r in raw.get("rims", [])],
-                           "rim": norm(frame["rim"], width, height) if frame.get("rim") else None})
+                           "rim": norm(frame["rim"], width, height) if frame.get("rim") else None,
+                           "ball": norm(frame["ball"], width, height) if frame.get("ball") else None})
     frames.sort(key=lambda f: f["t"])
     step = min((b["t"] - a["t"] for a, b in zip(frames, frames[1:]) if b["t"] > a["t"]), default=0.2)
     return {"step": round(step, 3), "frames": frames}

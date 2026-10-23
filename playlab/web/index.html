@@ -408,6 +408,7 @@ function playerCard(a) {
     for (const r of near.rims) draw(r, "#38c6e8", "rim");
     if (near.rim) draw(near.rim, "#38c6e8", "rim used", 3.5);
     for (const b of near.balls) draw(b, "#f5a623", "ball");
+    if (near.ball) draw(near.ball, "#f5a623", "ball used", 3.5);
     ctx.globalAlpha = 1;
   };
 
