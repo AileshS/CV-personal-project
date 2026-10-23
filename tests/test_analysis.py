@@ -403,3 +403,40 @@ def test_rim_crop_keeps_arc_room_and_maps_boxes_back_to_frame():
     found = analysis._cropped_ball_rim(Cropped(), frame, crop)
     assert Cropped.seen == ((240, 240, 3), 192)           # 240 px crop at the full-frame 0.75 scale
     assert found["balls"][0]["bbox"] == [10 + left, 20 + top, 14 + left, 24 + top]
+
+
+def _ball(cx, cy, confidence, size=6.):
+    return {"bbox": [cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2], "confidence": confidence}
+
+
+def test_ball_near_its_previous_position_beats_a_stronger_distractor_elsewhere():
+    rim = {"bbox": [70., 20., 90., 25.], "confidence": .9}
+    _, last = analysis._ball_observation({"balls": [_ball(40, 50, .8)]}, rim, 0., None, 160)
+    # A head across the frame scores higher than the ball, which barely moved.
+    row, last = analysis._ball_observation({"balls": [_ball(42, 48, .45), _ball(130, 30, .7)]},
+                                           rim, .2, last, 160)
+    assert (row["x"], row["y"]) == (42, 48)
+    assert analysis._chosen_ball(last, .2)["bbox"] == _ball(42, 48, .45)["bbox"]
+
+
+def test_ball_prior_follows_velocity_and_expires():
+    _, last = analysis._ball_observation({"balls": [_ball(20, 60, .8)]}, None, 0., None, 160)
+    _, last = analysis._ball_observation({"balls": [_ball(30, 55, .8)]}, None, .1, last, 160)
+    # Predicted near (40, 50): a candidate there wins over one at the old spot.
+    _, last = analysis._ball_observation({"balls": [_ball(20, 60, .5), _ball(40, 50, .5)]}, None, .2, last, 160)
+    assert (last["x"], last["y"]) == (40, 50)
+    # After the prior expires, a lone far detection is accepted and an even split is ambiguous again.
+    _, later = analysis._ball_observation({"balls": [_ball(140, 20, .6)]}, None, 1., last, 160)
+    assert (later["x"], later["y"]) == (140, 20)
+    assert analysis._ball_observation({"balls": [_ball(20, 60, .5), _ball(140, 20, .45)]},
+                                      None, 1., last, 160) == (None, last)
+
+
+def test_two_candidates_near_the_prior_stay_ambiguous_and_far_jumps_are_rejected():
+    _, last = analysis._ball_observation({"balls": [_ball(40, 50, .8)]}, None, 0., None, 160)
+    assert analysis._ball_observation({"balls": [_ball(41, 50, .5), _ball(44, 52, .45)]},
+                                      None, .2, last, 160) == (None, last)
+    # A very strong detection far away outranks a weak near one, but a 0.2 s jump that far is rejected.
+    assert analysis._ball_observation({"balls": [_ball(42, 50, .15), _ball(140, 20, .95)]},
+                                      None, .2, last, 160) == (None, last)
+    assert analysis._chosen_ball(last, .2) is None

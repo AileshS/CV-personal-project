@@ -226,25 +226,87 @@ def _track_rim(frame, template):
     return box if box[0] < box[2] and box[1] < box[3] else None
 
 
+# Motion prior for picking the ball among several candidates. Distances are in
+# frame widths; dt is seconds since the last accepted ball.
+BALL_TRACK_MEMORY = .35        # older ball positions are not used as a prior
+BALL_JUMP_LIMIT = .18          # farther than this from the prior within memory: reject the frame
+BALL_PRIOR_SPREAD = (.04, .25)  # Gaussian sigma = width * (base + per_second * dt)
+BALL_PRIOR_FLOOR = .35         # a far candidate keeps this share of its score, so a strong ball can re-acquire
+BALL_AMBIGUITY_RATIO = .6      # with a prior: runner-up scoring above this share of the best is ambiguous
+
+
+def _predicted_ball(last_ball, at):
+    """Where the last accepted ball should be now (constant velocity), or None without a recent prior."""
+    if not last_ball or not 0 < at - last_ball["time"] < BALL_TRACK_MEMORY:
+        return None
+    dt = at - last_ball["time"]
+    return last_ball["x"] + last_ball["vx"] * dt, last_ball["y"] + last_ball["vy"] * dt, dt
+
+
+def _pick_ball(balls, last_ball, at, width):
+    """Rank ball candidates by detector score weighted by closeness to the predicted position.
+
+    Returns (ball, score) or None when the top two are too close to call. With no
+    recent prior the score is the raw detector score, as before.
+    """
+    predicted = _predicted_ball(last_ball, at)
+    scored = []
+    for ball in balls:
+        weight = 1.
+        if predicted:
+            px, py, dt = predicted
+            x, y = _center(ball)
+            sigma = width * (BALL_PRIOR_SPREAD[0] + BALL_PRIOR_SPREAD[1] * dt)
+            closeness = float(np.exp(-.5 * (np.hypot(x - px, y - py) / sigma) ** 2))
+            weight = BALL_PRIOR_FLOOR + (1 - BALL_PRIOR_FLOOR) * closeness
+        scored.append((float(ball["confidence"]) * weight, ball))
+    scored.sort(key=lambda row: row[0], reverse=True)
+    if len(scored) > 1:
+        best, second = scored[0][0], scored[1][0]
+        if (second > BALL_AMBIGUITY_RATIO * best) if predicted else (best - second <= .2):
+            return None
+    return scored[0][1], scored[0][0]
+
+
 def _ball_observation(detections, rim, at, last_ball, width):
-    """Pick one unambiguous, plausibly moving ball; returns (rim-relative row or None, last_ball)."""
-    balls = sorted(detections.get("balls", []), key=lambda b: b["confidence"], reverse=True)
+    """Pick one unambiguous, plausibly moving ball; returns (rim-relative row or None, last_ball).
+
+    last_ball is {"time", "x", "y", "vx", "vy"} for the last accepted ball. Candidates
+    near where it should be now are preferred, so a head or jersey elsewhere in the
+    frame does not take over from a slightly weaker ball on its expected path.
+    """
+    balls = detections.get("balls", [])
     if not balls:
         return None, last_ball
     # Reject ambiguous detections and implausible jumps instead
     # of allowing a distractor to fabricate a rim crossing.
-    if len(balls) > 1 and balls[0]["confidence"] - balls[1]["confidence"] <= .2:
+    picked = _pick_ball(balls, last_ball, at, width)
+    if picked is None:
         return None, last_ball
-    x, y = _center(balls[0])
-    if last_ball and at - last_ball[0] < .35 and np.hypot(x - last_ball[1], y - last_ball[2]) > width * .18:
+    ball, _ = picked
+    x, y = _center(ball)
+    predicted = _predicted_ball(last_ball, at)
+    if predicted and np.hypot(x - predicted[0], y - predicted[1]) > width * BALL_JUMP_LIMIT:
         return None, last_ball
+    vx = vy = 0.
+    if last_ball and 0 < at - last_ball["time"] < BALL_TRACK_MEMORY:
+        vx, vy = (x - last_ball["x"]) / (at - last_ball["time"]), (y - last_ball["y"]) / (at - last_ball["time"])
+    current = {"time": float(at), "x": float(x), "y": float(y), "vx": float(vx), "vy": float(vy),
+               "bbox": [float(v) for v in ball["bbox"]], "confidence": float(ball["confidence"])}
     if not rim:
-        return None, (at, x, y)
+        return None, current
     rx, ry = _center(rim)
     return ({"time": float(at), "x": float(x), "y": float(y), "rim_x": rx, "rim_y": ry,
              "rim_width": rim["bbox"][2] - rim["bbox"][0], "rim_height": rim["bbox"][3] - rim["bbox"][1],
-             "confidence": float(balls[0]["confidence"])},
-            (at, x, y))
+             "confidence": float(ball["confidence"])},
+            current)
+
+
+def _chosen_ball(last_ball, at):
+    """The ball box picked for this frame, or None when no candidate was accepted."""
+    if not last_ball or last_ball["time"] != float(at):
+        return None
+    return {"bbox": last_ball["bbox"], "confidence": last_ball["confidence"]}
 
 
 def _rim_distance(point):
@@ -441,6 +503,7 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                                      "width": width, "height": height, "detector_mode": detector.mode,
                                      "view_changed": bool(view_changed)})
                 row, last_ball = _ball_observation(detections, rim, at, last_ball, width)
+                chunk_frames[-1]["ball"] = _chosen_ball(last_ball, at)
                 if row:
                     chunk_rows.append(row)
                 if progress and len(chunk_frames) % 5 == 0:
@@ -505,6 +568,7 @@ def analyze_possession(store, possession_id, device="cpu", weights=None, model_b
                                       "width": frame.shape[1], "height": frame.shape[0],
                                       "detector_mode": active.mode})
             row, last_ball = _ball_observation(detections, rim, at, last_ball, frame.shape[1])
+            diagnostic_frames[-1]["ball"] = _chosen_ball(last_ball, at)
             if row:
                 rows.append(row)
             if report and count % 15 == 0:
